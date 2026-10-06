@@ -5,6 +5,8 @@ import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
 
 import authRoutes from "./routes/authRoutes.js";
+import vendorAuthRoutes from "./routes/vendorAuthRoutes.js";
+import vendorRoutes from "./routes/vendorRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
@@ -73,6 +75,8 @@ app.get("/api", (req, res) => {
     message: "BhansaMart API is online and ready.",
     endpoints: {
       auth: "/api/auth",
+      vendorAuth: "/api/auth/vendor",
+      vendor: "/api/vendor",
       health: "/api/health",
     },
     timestamp: new Date().toISOString(),
@@ -88,7 +92,9 @@ app.get("/api/health", (req, res) => {
 });
 
 // 6. Mount Feature Routes
+app.use("/api/auth/vendor", vendorAuthRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/api/vendor", vendorRoutes);
 
 // 7. Catch Unhandled 404 Routes
 app.use(notFoundHandler);

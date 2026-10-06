@@ -28,6 +28,14 @@ export const register = async (req, res, next) => {
     // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
+      if (existingUser.role === "vendor") {
+        return next(
+          new AppError(
+            "This email is already registered as a Vendor account. One email can only be used for either Customer or Vendor.",
+            409
+          )
+        );
+      }
       return next(new AppError("An account with this email already exists.", 400));
     }
 
@@ -39,6 +47,7 @@ export const register = async (req, res, next) => {
       address: address || "",
       dateOfBirth,
       gender,
+      role: "customer",
       isEmailVerified: true,
       lastLoginAt: new Date(),
     });
@@ -191,6 +200,16 @@ export const login = async (req, res, next) => {
 
     if (!user || !(await user.comparePassword(password))) {
       return next(new AppError("Invalid email or password.", 401));
+    }
+
+    // Role verification: One email is either customer or vendor
+    if (user.role === "vendor") {
+      return next(
+        new AppError(
+          "This account is registered as a Vendor. Please log in through the Vendor Portal.",
+          403
+        )
+      );
     }
 
     // Check if account is active

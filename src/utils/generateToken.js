@@ -7,7 +7,7 @@ import jwt from "jsonwebtoken";
  */
 export const generateAccessToken = (user) => {
   const payload = {
-    userId: user._id.toString(),
+    userId: user._id ? user._id.toString() : user.toString(),
     email: user.email,
     role: user.role || "user",
   };
@@ -16,6 +16,31 @@ export const generateAccessToken = (user) => {
   const expiresIn = process.env.JWT_EXPIRES_IN || "7d";
 
   return jwt.sign(payload, secret, { expiresIn });
+};
+
+/**
+ * Generate Token and optionally set HTTP-only cookie
+ */
+export const generateTokenAndSetCookie = (res, userId, role = "user") => {
+  const payload = {
+    userId: userId.toString(),
+    role,
+  };
+
+  const secret = process.env.JWT_SECRET || "default_jwt_secret_change_in_production";
+  const expiresIn = process.env.JWT_EXPIRES_IN || "7d";
+  const token = jwt.sign(payload, secret, { expiresIn });
+
+  if (res && res.cookie) {
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    });
+  }
+
+  return token;
 };
 
 /**
