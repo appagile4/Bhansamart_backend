@@ -7,6 +7,7 @@ import rateLimit from "express-rate-limit";
 import authRoutes from "./routes/authRoutes.js";
 import vendorAuthRoutes from "./routes/vendorAuthRoutes.js";
 import vendorRoutes from "./routes/vendorRoutes.js";
+import productRoutes from "./routes/productRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
@@ -54,9 +55,9 @@ const globalLimiter = rateLimit({
 });
 app.use("/api", globalLimiter);
 
-// 4. Body parsers
-app.use(express.json({ limit: "10kb" }));
-app.use(express.urlencoded({ extended: true, limit: "10kb" }));
+// 4. Body parsers (Support base64 image strings & large multipart payloads)
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(cookieParser());
 
 // 5. Health Check & Root Endpoints
@@ -77,6 +78,7 @@ app.get("/api", (req, res) => {
       auth: "/api/auth",
       vendorAuth: "/api/auth/vendor",
       vendor: "/api/vendor",
+      products: "/api/products",
       health: "/api/health",
     },
     timestamp: new Date().toISOString(),
@@ -95,6 +97,7 @@ app.get("/api/health", (req, res) => {
 app.use("/api/auth/vendor", vendorAuthRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/vendor", vendorRoutes);
+app.use("/api/products", productRoutes);
 
 // 7. Catch Unhandled 404 Routes
 app.use(notFoundHandler);

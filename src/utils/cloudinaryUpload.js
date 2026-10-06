@@ -49,6 +49,53 @@ export const uploadToCloudinary = (fileSource, folder = "bhansamart/avatars") =>
 };
 
 /**
+ * Upload product image to Cloudinary (optimized for ecommerce products)
+ * @param {Buffer|string} fileSource 
+ * @param {string} vendorSlug 
+ * @returns {Promise<{url: string, publicId: string}>}
+ */
+export const uploadProductImageToCloudinary = (
+  fileSource,
+  vendorSlug = "general"
+) => {
+  return new Promise((resolve, reject) => {
+    const folder = `bhansamart/vendors/${vendorSlug}/products`;
+    const options = {
+      folder,
+      transformation: [
+        { width: 1200, height: 1200, crop: "limit" },
+        { quality: "auto" },
+        { fetch_format: "auto" },
+      ],
+    };
+
+    if (typeof fileSource === "string") {
+      cloudinary.uploader.upload(fileSource, options, (error, result) => {
+        if (error) return reject(error);
+        resolve({
+          url: result.secure_url || result.url,
+          publicId: result.public_id,
+        });
+      });
+      return;
+    }
+
+    const uploadStream = cloudinary.uploader.upload_stream(
+      options,
+      (error, result) => {
+        if (error) return reject(error);
+        resolve({
+          url: result.secure_url || result.url,
+          publicId: result.public_id,
+        });
+      }
+    );
+
+    uploadStream.end(fileSource);
+  });
+};
+
+/**
  * Delete an image from Cloudinary using its public URL or public_id
  * @param {string} imageUrl - Cloudinary secure URL or public_id
  */
