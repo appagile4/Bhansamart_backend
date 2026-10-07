@@ -8,9 +8,11 @@ import authRoutes from "./routes/authRoutes.js";
 import vendorAuthRoutes from "./routes/vendorAuthRoutes.js";
 import vendorRoutes from "./routes/vendorRoutes.js";
 import productRoutes from "./routes/productRoutes.js";
+import reviewRoutes from "./routes/reviewRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
+
 
 // 1. Security HTTP Headers
 app.use(helmet());
@@ -98,6 +100,8 @@ app.use("/api/auth/vendor", vendorAuthRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/vendor", vendorRoutes);
 app.use("/api/products", productRoutes);
+app.use("/api/reviews", reviewRoutes);
+
 
 // 7. Catch Unhandled 404 Routes
 app.use(notFoundHandler);

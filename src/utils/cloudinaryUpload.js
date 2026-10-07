@@ -1,6 +1,23 @@
 import cloudinary from "../config/cloudinary.js";
 
 /**
+ * Sanitize folder and slug path to be Cloudinary-safe (only a-z, 0-9, _, -)
+ */
+const sanitizePath = (pathStr) => {
+  return String(pathStr || "")
+    .split("/")
+    .map((segment) =>
+      segment
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_|_$/g, "")
+    )
+    .filter(Boolean)
+    .join("/");
+};
+
+/**
  * Upload an image buffer or base64 string to Cloudinary
  * @param {Buffer|string} fileSource - Buffer from multer or base64 string
  * @param {string} folder - Destination folder on Cloudinary
@@ -8,12 +25,14 @@ import cloudinary from "../config/cloudinary.js";
  */
 export const uploadToCloudinary = (fileSource, folder = "bhansamart/avatars") => {
   return new Promise((resolve, reject) => {
+    const safeFolder = sanitizePath(folder) || "bhansamart/avatars";
+
     // If base64 string or URI
     if (typeof fileSource === "string") {
       cloudinary.uploader.upload(
         fileSource,
         {
-          folder,
+          folder: safeFolder,
           transformation: [
             { width: 500, height: 500, crop: "fill", gravity: "face" },
             { quality: "auto" },
@@ -31,7 +50,7 @@ export const uploadToCloudinary = (fileSource, folder = "bhansamart/avatars") =>
     // If buffer
     const uploadStream = cloudinary.uploader.upload_stream(
       {
-        folder,
+        folder: safeFolder,
         transformation: [
           { width: 500, height: 500, crop: "fill", gravity: "face" },
           { quality: "auto" },
@@ -59,7 +78,8 @@ export const uploadProductImageToCloudinary = (
   vendorSlug = "general"
 ) => {
   return new Promise((resolve, reject) => {
-    const folder = `bhansamart/vendors/${vendorSlug}/products`;
+    const safeVendorSlug = sanitizePath(vendorSlug) || "general";
+    const folder = `bhansamart/vendors/${safeVendorSlug}/products`;
     const options = {
       folder,
       transformation: [

@@ -2,15 +2,31 @@ import { Router } from "express";
 import {
   createProduct,
   getVendorProducts,
+  getAllProducts,
   getProductById,
   updateProduct,
   deleteProduct,
   toggleProductStock,
+  recordProductView,
+  recordProductOrder,
+  recordProductRefund,
 } from "../controllers/productController.js";
 import { protect } from "../middleware/authMiddleware.js";
 import { upload } from "../middleware/uploadMiddleware.js";
+import reviewRoutes from "./reviewRoutes.js";
 
 const router = Router();
+
+// ─── NESTED REVIEW ROUTES ────────────────────────────────────
+router.use("/:productId/reviews", reviewRoutes);
+
+// ─── PUBLIC CUSTOMER PRODUCT ENDPOINTS ───────────────────────
+router.get("/", getAllProducts);
+
+// ─── PERFORMANCE METRICS TRACKING (Views, Orders, Refunds) ───
+router.post("/:id/view", recordProductView);
+router.post("/:id/order", recordProductOrder);
+router.post("/:id/refund", recordProductRefund);
 
 // ─── VENDOR PROTECTED PRODUCT ENDPOINTS ───────────────────────
 
@@ -34,3 +50,5 @@ router.patch("/:id/toggle-stock", protect, toggleProductStock);
 router.delete("/:id", protect, deleteProduct);
 
 export default router;
+
+

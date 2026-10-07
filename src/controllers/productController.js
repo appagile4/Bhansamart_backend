@@ -352,6 +352,18 @@ export const getProductById = async (req, res, next) => {
       });
     }
 
+    // Automatically record view if customer view requested
+    if (req.query.incrementView === "true") {
+      product.views = (product.views || 0) + 1;
+      if (product.views > 0) {
+        product.conversionRate = Math.min(
+          100,
+          Math.round(((product.ordersCount || 0) / product.views) * 100)
+        );
+      }
+      await product.save();
+    }
+
     res.status(200).json({
       success: true,
       product,
@@ -360,6 +372,124 @@ export const getProductById = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * @desc    Record product view (Customer click/visit)
+ * @route   POST /api/products/:id/view
+ * @access  Public
+ */
+export const recordProductView = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const query = id.match(/^[0-9a-fA-F]{24}$/) ? { _id: id } : { slug: id };
+
+    const product = await Product.findOne(query);
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found." });
+    }
+
+    product.views = (product.views || 0) + 1;
+    if (product.views > 0) {
+      product.conversionRate = Math.min(
+        100,
+        Math.round(((product.ordersCount || 0) / product.views) * 100)
+      );
+    }
+    await product.save();
+
+    res.status(200).json({
+      success: true,
+      views: product.views,
+      ordersCount: product.ordersCount,
+      conversionRate: product.conversionRate,
+      returnRefundRate: product.returnRefundRate,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Record product order (Customer purchase)
+ * @route   POST /api/products/:id/order
+ * @access  Public / Private
+ */
+export const recordProductOrder = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const count = Number(req.body.count) || 1;
+    const query = id.match(/^[0-9a-fA-F]{24}$/) ? { _id: id } : { slug: id };
+
+    const product = await Product.findOne(query);
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found." });
+    }
+
+    product.ordersCount = (product.ordersCount || 0) + count;
+    if (product.views > 0) {
+      product.conversionRate = Math.min(
+        100,
+        Math.round((product.ordersCount / product.views) * 100)
+      );
+    }
+    if (product.ordersCount > 0) {
+      product.returnRefundRate = Math.min(
+        100,
+        Math.round(((product.refundsCount || 0) / product.ordersCount) * 100)
+      );
+    }
+    await product.save();
+
+    res.status(200).json({
+      success: true,
+      views: product.views,
+      ordersCount: product.ordersCount,
+      conversionRate: product.conversionRate,
+      returnRefundRate: product.returnRefundRate,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Record product return & refund request
+ * @route   POST /api/products/:id/refund
+ * @access  Public / Private
+ */
+export const recordProductRefund = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const count = Number(req.body.count) || 1;
+    const query = id.match(/^[0-9a-fA-F]{24}$/) ? { _id: id } : { slug: id };
+
+    const product = await Product.findOne(query);
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found." });
+    }
+
+    product.refundsCount = (product.refundsCount || 0) + count;
+    if (product.ordersCount > 0) {
+      product.returnRefundRate = Math.min(
+        100,
+        Math.round((product.refundsCount / product.ordersCount) * 100)
+      );
+    }
+    await product.save();
+
+    res.status(200).json({
+      success: true,
+      views: product.views,
+      ordersCount: product.ordersCount,
+      refundsCount: product.refundsCount,
+      conversionRate: product.conversionRate,
+      returnRefundRate: product.returnRefundRate,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 
 /**
  * @desc    Update product details & images
@@ -384,30 +514,103 @@ export const updateProduct = async (req, res, next) => {
       });
     }
 
-    // Upload new images to Cloudinary if provided
-    const newImages = [...(product.images || [])];
     const vendorSlug =
       vendor.businessDetails?.businessName || req.user.name || "general";
 
+    // 1. Process existing images kept by user
+    let preservedImages = [];
+    if (req.body.existingImages !== undefined) {
+      try {
+        const parsed =
+          typeof req.body.existingImages === "string"
+            ? JSON.parse(req.body.existingImages)
+            : req.body.existingImages;
+        if (Array.isArray(parsed)) {
+          preservedImages = parsed.map((img) => {
+            if (typeof img === "string") {
+              return { url: img, altText: req.body.name || product.name };
+            }
+            return {
+              url: img.url,
+              publicId: img.publicId,
+              altText: img.altText || req.body.name || product.name,
+            };
+          });
+        }
+      } catch {}
+    } else if (req.body.images && (!req.files || req.files.length === 0)) {
+      try {
+        const parsed =
+          typeof req.body.images === "string"
+            ? JSON.parse(req.body.images)
+            : req.body.images;
+        if (Array.isArray(parsed)) {
+          preservedImages = parsed.map((img) =>
+            typeof img === "string"
+              ? { url: img, altText: req.body.name || product.name }
+              : img
+          );
+        }
+      } catch {}
+    } else {
+      preservedImages = product.images || [];
+    }
+
+    // 2. Upload new image files to Cloudinary from Multer
+    const newlyUploaded = [];
     if (req.files && Array.isArray(req.files) && req.files.length > 0) {
       for (const file of req.files) {
         const result = await uploadProductImageToCloudinary(
           file.buffer,
           vendorSlug
         );
-        newImages.push({
+        newlyUploaded.push({
           url: result.url,
           publicId: result.publicId,
           altText: req.body.name || product.name,
         });
       }
+    } else if (req.file) {
+      const result = await uploadProductImageToCloudinary(
+        req.file.buffer,
+        vendorSlug
+      );
+      newlyUploaded.push({
+        url: result.url,
+        publicId: result.publicId,
+        altText: req.body.name || product.name,
+      });
     }
 
-    // Update fields
-    const updates = { ...req.body };
-    if (req.files && req.files.length > 0) {
-      updates.images = newImages;
+    // Combine preserved + newly uploaded images
+    let finalImages = product.images || [];
+    if (
+      req.body.existingImages !== undefined ||
+      (req.files && req.files.length > 0) ||
+      req.file
+    ) {
+      finalImages = [...preservedImages, ...newlyUploaded];
     }
+
+    // 3. Build updates
+    const updates = { ...req.body };
+    updates.images = finalImages;
+
+    if (updates.name && updates.name !== product.name) {
+      updates.slug = `${slugify(updates.name, { lower: true, strict: true })}-${Date.now().toString(36)}`;
+    }
+
+    if (updates.price != null) updates.price = Number(updates.price) || 0;
+    if (updates.originalPrice != null)
+      updates.originalPrice = Number(updates.originalPrice) || updates.price;
+    if (updates.discountValue != null)
+      updates.discountValue = Number(updates.discountValue) || 0;
+    if (updates.stock != null) {
+      updates.stock = Number(updates.stock) || 0;
+      updates.inStock = updates.stock > 0;
+    }
+    if (updates.reorderLevel != null)
+      updates.reorderLevel = Number(updates.reorderLevel) || 5;
 
     if (updates.variants && typeof updates.variants === "string") {
       try {
@@ -423,10 +626,6 @@ export const updateProduct = async (req, res, next) => {
       try {
         updates.visibility = JSON.parse(updates.visibility);
       } catch {}
-    }
-
-    if (updates.stock != null) {
-      updates.inStock = Number(updates.stock) > 0;
     }
 
     const updatedProduct = await Product.findByIdAndUpdate(id, updates, {
@@ -529,6 +728,109 @@ export const deleteProduct = async (req, res, next) => {
     res.status(200).json({
       success: true,
       message: "Product deleted successfully.",
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Get all public products for customer app (filter by category, subCategory, search, etc.)
+ * @route   GET /api/products
+ * @access  Public
+ */
+export const getAllProducts = async (req, res, next) => {
+  try {
+    const {
+      search,
+      category,
+      subCategory,
+      brand,
+      minPrice,
+      maxPrice,
+      sortBy = "popularity",
+      inStockOnly,
+      page = 1,
+      limit = 100,
+    } = req.query;
+
+    const query = {
+      isDeleted: false,
+      status: { $ne: "Draft" },
+    };
+
+    if (inStockOnly === "true") {
+      query.inStock = true;
+    }
+
+    if (category && category !== "all" && category !== "All") {
+      query.category = new RegExp(`^${category.trim()}$`, "i");
+    }
+
+    if (subCategory && subCategory !== "all" && subCategory !== "All") {
+      query.subCategory = new RegExp(`^${subCategory.trim()}$`, "i");
+    }
+
+    if (brand && brand !== "all") {
+      query.brand = brand;
+    }
+
+    if (search && search.trim()) {
+      const regex = new RegExp(search.trim(), "i");
+      query.$or = [
+        { name: regex },
+        { category: regex },
+        { subCategory: regex },
+        { brand: regex },
+        { tags: regex },
+      ];
+    }
+
+    if (minPrice != null || maxPrice != null) {
+      query.price = {};
+      if (minPrice != null && !isNaN(Number(minPrice))) {
+        query.price.$gte = Number(minPrice);
+      }
+      if (maxPrice != null && !isNaN(Number(maxPrice))) {
+        query.price.$lte = Number(maxPrice);
+      }
+    }
+
+    let sortObj = { createdAt: -1 };
+    if (sortBy === "price_asc") {
+      sortObj = { price: 1 };
+    } else if (sortBy === "price_desc") {
+      sortObj = { price: -1 };
+    } else if (sortBy === "rating") {
+      sortObj = { ratingsAverage: -1 };
+    } else if (sortBy === "popularity") {
+      sortObj = { ratingsCount: -1, ratingsAverage: -1 };
+    }
+
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 100;
+    const skip = (pageNum - 1) * limitNum;
+
+    const [products, total] = await Promise.all([
+      Product.find(query)
+        .populate(
+          "vendor",
+          "businessDetails.businessName sellerDetails.sellerName brandDetails.brandLogo"
+        )
+        .sort(sortObj)
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Product.countDocuments(query),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      count: products.length,
+      total,
+      totalPages: Math.ceil(total / limitNum),
+      currentPage: pageNum,
+      products,
     });
   } catch (error) {
     next(error);

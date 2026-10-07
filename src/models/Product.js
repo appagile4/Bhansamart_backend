@@ -168,7 +168,36 @@ const productSchema = new mongoose.Schema(
       isNewArrival: { type: Boolean, default: false },
     },
 
-    // 8. Meta
+    // 8. Performance Metrics
+    views: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    ordersCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    refundsCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    conversionRate: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100,
+    },
+    returnRefundRate: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100,
+    },
+
+    // 9. Meta
     ratingsAverage: {
       type: Number,
       default: 0,
@@ -195,7 +224,7 @@ const productSchema = new mongoose.Schema(
   }
 );
 
-// Auto-compute discount before save
+// Auto-compute discount and performance metrics before save
 productSchema.pre("save", function () {
   if (this.originalPrice && this.originalPrice > this.price) {
     this.discount = parseFloat(
@@ -207,7 +236,25 @@ productSchema.pre("save", function () {
   if (this.stock <= 0) {
     this.inStock = false;
   }
+  // Auto-calculate conversion rate and return/refund rate
+  if (this.views > 0) {
+    this.conversionRate = Math.min(
+      100,
+      Math.round((this.ordersCount / this.views) * 100)
+    );
+  } else {
+    this.conversionRate = 0;
+  }
+  if (this.ordersCount > 0) {
+    this.returnRefundRate = Math.min(
+      100,
+      Math.round((this.refundsCount / this.ordersCount) * 100)
+    );
+  } else {
+    this.returnRefundRate = 0;
+  }
 });
+
 
 const Product = mongoose.model("Product", productSchema);
 
