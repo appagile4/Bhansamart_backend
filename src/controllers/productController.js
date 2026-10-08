@@ -4,7 +4,11 @@ import {
   uploadProductImageToCloudinary,
   deleteFromCloudinary,
 } from "../utils/cloudinaryUpload.js";
-import { generateSku, generateUniqueSlug } from "../utils/productUtils.js";
+import {
+  generateSku,
+  generateUniqueSlug,
+  slugify,
+} from "../utils/productUtils.js";
 import {
   getCache,
   setCache,
@@ -605,7 +609,7 @@ export const updateProduct = async (req, res, next) => {
     updates.images = finalImages;
 
     if (updates.name && updates.name !== product.name) {
-      updates.slug = `${slugify(updates.name, { lower: true, strict: true })}-${Date.now().toString(36)}`;
+      updates.slug = await generateUniqueSlug(updates.name, product._id);
     }
 
     if (updates.price != null) updates.price = Number(updates.price) || 0;
@@ -796,11 +800,29 @@ export const getAllProducts = async (req, res, next) => {
     }
 
     if (category && category !== "all" && category !== "All") {
-      query.category = new RegExp(`^${category.trim()}$`, "i");
+      const trimmed = category.trim();
+      let catRegex;
+      if (/^grocery/i.test(trimmed)) {
+        catRegex = /grocery/i;
+      } else if (/^snack/i.test(trimmed)) {
+        catRegex = /snack/i;
+      } else if (/^beauty/i.test(trimmed)) {
+        catRegex = /beauty/i;
+      } else if (/^station/i.test(trimmed) || /^school/i.test(trimmed) || /^office/i.test(trimmed)) {
+        catRegex = /stationery|school|office/i;
+      } else if (/^baby/i.test(trimmed) || /^kid/i.test(trimmed)) {
+        catRegex = /baby|kid|toy/i;
+      } else if (/^gift/i.test(trimmed)) {
+        catRegex = /gift/i;
+      } else {
+        catRegex = new RegExp(trimmed.replace(/-/g, ".*"), "i");
+      }
+      query.category = catRegex;
     }
 
     if (subCategory && subCategory !== "all" && subCategory !== "All") {
-      query.subCategory = new RegExp(`^${subCategory.trim()}$`, "i");
+      const trimmedSub = subCategory.trim().replace(/-/g, ".*");
+      query.subCategory = new RegExp(trimmedSub, "i");
     }
 
     if (brand && brand !== "all") {
