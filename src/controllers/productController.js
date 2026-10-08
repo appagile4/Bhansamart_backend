@@ -5,6 +5,11 @@ import {
   deleteFromCloudinary,
 } from "../utils/cloudinaryUpload.js";
 import { generateSku, generateUniqueSlug } from "../utils/productUtils.js";
+import {
+  getCache,
+  setCache,
+  invalidateCachePattern,
+} from "../config/redis.js";
 
 /**
  * Helper to resolve Vendor for logged-in user
@@ -212,6 +217,9 @@ export const createProduct = async (req, res, next) => {
       status: status || "Active",
       visibility: parsedVisibility,
     });
+
+    // Invalidate product cache in Redis asynchronously
+    invalidateCachePattern("products:*").catch(() => {});
 
     res.status(201).json({
       success: true,
@@ -633,6 +641,9 @@ export const updateProduct = async (req, res, next) => {
       runValidators: true,
     });
 
+    // Invalidate product cache in Redis asynchronously
+    invalidateCachePattern("products:*").catch(() => {});
+
     res.status(200).json({
       success: true,
       message: "Product updated successfully.",
@@ -678,6 +689,9 @@ export const toggleProductStock = async (req, res, next) => {
 
     await product.save();
 
+    // Invalidate product cache in Redis asynchronously
+    invalidateCachePattern("products:*").catch(() => {});
+
     res.status(200).json({
       success: true,
       message: `Product is now ${product.inStock ? "Available" : "Disabled"}.`,
@@ -716,6 +730,9 @@ export const deleteProduct = async (req, res, next) => {
     product.status = "archived";
     await product.save();
 
+    // Invalidate product cache in Redis asynchronously
+    invalidateCachePattern("products:*").catch(() => {});
+
     // Optionally delete from Cloudinary
     if (product.images && product.images.length > 0) {
       for (const img of product.images) {
@@ -751,9 +768,24 @@ export const getAllProducts = async (req, res, next) => {
       sortBy = "popularity",
       inStockOnly,
       page = 1,
-      limit = 100,
+      limit = 20,
     } = req.query;
 
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+
+    // ── 1. Redis Cache Strategy ─────────────────────────────────────────
+    const cacheKey = `products:cat:${(category || "all").toLowerCase()}:sub:${(subCategory || "all").toLowerCase()}:brand:${(brand || "all").toLowerCase()}:search:${(search || "").trim().toLowerCase()}:min:${minPrice || ""}:max:${maxPrice || ""}:sort:${sortBy}:inStock:${inStockOnly || "false"}:page:${pageNum}:limit:${limitNum}`;
+
+    const cachedResult = await getCache(cacheKey);
+    if (cachedResult) {
+      return res.status(200).json({
+        ...cachedResult,
+        fromCache: true,
+      });
+    }
+
+    // ── 2. Build MongoDB Query ──────────────────────────────────────────
     const query = {
       isDeleted: false,
       status: { $ne: "Draft" },
@@ -807,8 +839,6 @@ export const getAllProducts = async (req, res, next) => {
       sortObj = { ratingsCount: -1, ratingsAverage: -1 };
     }
 
-    const pageNum = parseInt(page, 10) || 1;
-    const limitNum = parseInt(limit, 10) || 100;
     const skip = (pageNum - 1) * limitNum;
 
     const [products, total] = await Promise.all([
@@ -824,14 +854,21 @@ export const getAllProducts = async (req, res, next) => {
       Product.countDocuments(query),
     ]);
 
-    res.status(200).json({
+    const totalPages = Math.ceil(total / limitNum) || 1;
+    const responsePayload = {
       success: true,
       count: products.length,
       total,
-      totalPages: Math.ceil(total / limitNum),
+      totalPages,
       currentPage: pageNum,
+      hasMore: pageNum < totalPages,
       products,
-    });
+    };
+
+    // Store in Redis with TTL 300 seconds (5 minutes)
+    setCache(cacheKey, responsePayload, 300).catch(() => {});
+
+    res.status(200).json(responsePayload);
   } catch (error) {
     next(error);
   }

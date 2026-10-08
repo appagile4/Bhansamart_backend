@@ -255,6 +255,20 @@ productSchema.pre("save", function () {
   }
 });
 
+// ── High-Performance Compound Indexes for Catalog & Pagination ──
+productSchema.index({ category: 1, isDeleted: 1, status: 1, createdAt: -1 });
+productSchema.index({ category: 1, subCategory: 1, isDeleted: 1, status: 1 });
+productSchema.index({ category: 1, price: 1, isDeleted: 1 });
+productSchema.index({ category: 1, ratingsCount: -1, ratingsAverage: -1 });
+productSchema.index({ vendor: 1, isDeleted: 1, createdAt: -1 });
+productSchema.index({ isDeleted: 1, status: 1, inStock: 1 });
+productSchema.index({
+  name: "text",
+  category: "text",
+  subCategory: "text",
+  brand: "text",
+  tags: "text",
+});
 
 const Product = mongoose.model("Product", productSchema);
 

@@ -9,6 +9,7 @@ import vendorAuthRoutes from "./routes/vendorAuthRoutes.js";
 import vendorRoutes from "./routes/vendorRoutes.js";
 import productRoutes from "./routes/productRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
+import wishlistRoutes from "./routes/wishlistRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
@@ -101,6 +102,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/vendor", vendorRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/reviews", reviewRoutes);
+app.use("/api/wishlist", wishlistRoutes);
 
 
 // 7. Catch Unhandled 404 Routes
