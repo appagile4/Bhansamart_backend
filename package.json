@@ -5,7 +5,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "seed:delivery": "node src/scripts/seedDeliveryBoy.js",
+    "test:delivery": "node src/scripts/testDeliveryWorkflow.js"
   },
   "keywords": [
     "bhansamart",
@@ -32,7 +34,8 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.10.2",
     "multer": "^2.4.0",
-    "nodemailer": "^10.0.13"
+    "nodemailer": "^10.0.13",
+    "socket.io": "^4.8.4"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

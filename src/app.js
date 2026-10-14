@@ -12,6 +12,14 @@ import reviewRoutes from "./routes/reviewRoutes.js";
 import wishlistRoutes from "./routes/wishlistRoutes.js";
 import cartRoutes from "./routes/cartRoutes.js";
 import addressRoutes from "./routes/addressRoutes.js";
+import orderRoutes from "./routes/orderRoutes.js";
+import deliveryAuthRoutes from "./routes/deliveryAuthRoutes.js";
+import deliveryDocumentRoutes from "./routes/deliveryDocumentRoutes.js";
+import deliveryDepositRoutes from "./routes/deliveryDepositRoutes.js";
+import deliveryLocationRoutes from "./routes/deliveryLocationRoutes.js";
+import deliveryAssignmentRoutes from "./routes/deliveryAssignmentRoutes.js";
+import deliveryEarningsRoutes from "./routes/deliveryEarningsRoutes.js";
+import adminDeliveryRoutes from "./routes/adminDeliveryRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
@@ -107,6 +115,19 @@ app.use("/api/reviews", reviewRoutes);
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/address", addressRoutes);
+app.use("/api/orders", orderRoutes);
+
+// Delivery Boy Module Routes
+app.use("/api/delivery/auth", deliveryAuthRoutes);
+app.use("/api/delivery/documents", deliveryDocumentRoutes);
+app.use("/api/delivery/deposit", deliveryDepositRoutes);
+app.use("/api/delivery/availability", deliveryLocationRoutes);
+app.use("/api/delivery/location", deliveryLocationRoutes);
+app.use("/api/delivery/assignments", deliveryAssignmentRoutes);
+app.use("/api/delivery/earnings", deliveryEarningsRoutes);
+
+// Admin Delivery Management Routes
+app.use("/api/admin/delivery", adminDeliveryRoutes);
 
 
 // 7. Catch Unhandled 404 Routes

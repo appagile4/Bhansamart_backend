@@ -771,6 +771,8 @@ export const getAllProducts = async (req, res, next) => {
       maxPrice,
       sortBy = "popularity",
       inStockOnly,
+      vendorId,
+      city,
       page = 1,
       limit = 20,
     } = req.query;
@@ -779,7 +781,7 @@ export const getAllProducts = async (req, res, next) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
 
     // ── 1. Redis Cache Strategy ─────────────────────────────────────────
-    const cacheKey = `products:cat:${(category || "all").toLowerCase()}:sub:${(subCategory || "all").toLowerCase()}:brand:${(brand || "all").toLowerCase()}:search:${(search || "").trim().toLowerCase()}:min:${minPrice || ""}:max:${maxPrice || ""}:sort:${sortBy}:inStock:${inStockOnly || "false"}:page:${pageNum}:limit:${limitNum}`;
+    const cacheKey = `products:cat:${(category || "all").toLowerCase()}:sub:${(subCategory || "all").toLowerCase()}:brand:${(brand || "all").toLowerCase()}:search:${(search || "").trim().toLowerCase()}:vendor:${vendorId || "all"}:city:${city || "all"}:min:${minPrice || ""}:max:${maxPrice || ""}:sort:${sortBy}:inStock:${inStockOnly || "false"}:page:${pageNum}:limit:${limitNum}`;
 
     const cachedResult = await getCache(cacheKey);
     if (cachedResult) {
@@ -794,6 +796,24 @@ export const getAllProducts = async (req, res, next) => {
       isDeleted: false,
       status: { $ne: "Draft" },
     };
+
+    // Filter by active eligible vendors
+    if (vendorId && vendorId !== "all" && vendorId.match(/^[0-9a-fA-F]{24}$/)) {
+      query.vendor = vendorId;
+    } else {
+      const activeVendorQuery = { status: { $in: ["approved", "active"] } };
+      if (city && city.trim()) {
+        const cityRegex = new RegExp(city.trim(), "i");
+        activeVendorQuery.$or = [
+          { "shippingLocations.city": cityRegex },
+          { "sellerDetails.city": cityRegex },
+        ];
+      }
+      const eligibleVendors = await Vendor.find(activeVendorQuery).select("_id");
+      if (eligibleVendors.length > 0) {
+        query.vendor = { $in: eligibleVendors.map((v) => v._id) };
+      }
+    }
 
     if (inStockOnly === "true") {
       query.inStock = true;
@@ -867,7 +887,7 @@ export const getAllProducts = async (req, res, next) => {
       Product.find(query)
         .populate(
           "vendor",
-          "businessDetails.businessName sellerDetails.sellerName brandDetails.brandLogo"
+          "businessDetails.businessName businessDetails.categories sellerDetails.sellerName sellerDetails.city brandDetails.brandLogo shippingLocations"
         )
         .sort(sortObj)
         .skip(skip)
