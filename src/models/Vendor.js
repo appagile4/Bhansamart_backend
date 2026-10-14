@@ -84,6 +84,23 @@ const vendorSchema = new mongoose.Schema(
       default: "active",
     },
 
+    // Vendor Financial Ledger & Custody Wallet
+    wallet: {
+      currentBalance: { type: Number, default: 0, min: 0 }, // Eligible withdrawable balance
+      totalEarned: { type: Number, default: 0, min: 0 },
+      pendingSettlement: { type: Number, default: 0, min: 0 },
+      codCashWithDeliveryBoys: { type: Number, default: 0, min: 0 }, // Cash in delivery boys custody
+    },
+
+    // Vendor Configured Payment QR Code & UPI Details
+    paymentSettings: {
+      qrCodeUrl: { type: String, default: "" },
+      qrCodePublicId: { type: String, default: null },
+      upiId: { type: String, default: "" },
+      accountName: { type: String, default: "" },
+      acceptQrPayments: { type: Boolean, default: false },
+    },
+
     adminRemark: { type: String, default: "" },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },

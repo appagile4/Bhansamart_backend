@@ -1,0 +1,102 @@
+import mongoose from "mongoose";
+
+const vendorTransactionSchema = new mongoose.Schema(
+  {
+    vendor: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Vendor",
+      required: true,
+      index: true,
+    },
+    order: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Order",
+      index: true,
+      default: null,
+    },
+    deliveryBoy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DeliveryBoy",
+      index: true,
+      default: null,
+    },
+    type: {
+      type: String,
+      enum: [
+        "ORDER_EARNING",
+        "COD_COLLECTION",
+        "COD_HANDOVER",
+        "WITHDRAWAL",
+        "PLATFORM_FEE",
+        "DIRECT_QR_PAYMENT",
+      ],
+      required: true,
+      index: true,
+    },
+    amount: {
+      type: Number,
+      required: true,
+    },
+    grossAmount: {
+      type: Number,
+      default: 0,
+    },
+    commission: {
+      type: Number,
+      default: 0,
+    },
+    netAmount: {
+      type: Number,
+      default: 0,
+    },
+    paymentMethod: {
+      type: String,
+      default: "Cash on delivery",
+    },
+    status: {
+      type: String,
+      enum: [
+        "PENDING",
+        "SETTLED",
+        "CASH_IN_CUSTODY",
+        "SUBMITTED",
+        "COMPLETED",
+        "FAILED",
+        "DIRECT_SETTLED",
+      ],
+      default: "SETTLED",
+      index: true,
+    },
+    idempotencyKey: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
+    notes: {
+      type: String,
+      default: "",
+    },
+    bankReference: {
+      type: String,
+      default: "",
+    },
+    timestamp: {
+      type: Date,
+      default: Date.now,
+      index: true,
+    },
+  },
+  { timestamps: true }
+);
+
+// Indexes for fast lookup
+vendorTransactionSchema.index({ vendor: 1, createdAt: -1 });
+vendorTransactionSchema.index({ vendor: 1, type: 1 });
+vendorTransactionSchema.index({ vendor: 1, status: 1 });
+
+const VendorTransaction =
+  mongoose.models.VendorTransaction ||
+  mongoose.model("VendorTransaction", vendorTransactionSchema);
+
+export default VendorTransaction;

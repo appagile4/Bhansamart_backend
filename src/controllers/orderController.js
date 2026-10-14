@@ -4,10 +4,12 @@ import Vendor from "../models/Vendor.js";
 import Cart from "../models/Cart.js";
 import Address from "../models/Address.js";
 import DeliveryAssignment from "../models/DeliveryAssignment.js";
+import VendorNotification from "../models/VendorNotification.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
   emitNewOrderToVendor,
   emitOrderStatusUpdate,
+  emitVendorNotification,
 } from "../socket/socketManager.js";
 import { dispatchOrderToNearestPartner } from "../utils/dispatchEngine.js";
 
@@ -252,6 +254,23 @@ export const createOrder = async (req, res, next) => {
 
     // ── 10. Real-Time Socket.IO Notification to Authorized Vendor ───────
     emitNewOrderToVendor(vendor._id.toString(), populatedOrder);
+
+    // Persistent vendor notification (available after restarting the app)
+    const vendorNotif = await VendorNotification.create({
+      vendor: vendor._id,
+      order: newOrder._id,
+      type: "NEW_ORDER",
+      title: "New Customer Order!",
+      message: `Order #${newOrder.orderNumber} received for NPR ${newOrder.totalAmount} (${newOrder.paymentMethod}).`,
+      data: {
+        orderNumber: newOrder.orderNumber,
+        totalAmount: newOrder.totalAmount,
+        customerName: populatedOrder.customer?.name || "Customer",
+        itemsCount: newOrder.totalCount,
+        paymentMethod: newOrder.paymentMethod,
+      },
+    });
+    emitVendorNotification(vendor._id.toString(), vendorNotif);
 
     // Emit to customer's personal channel
     emitOrderStatusUpdate(
@@ -578,6 +597,31 @@ export const updateOrderStatus = async (req, res, next) => {
       updatedOrder.customer?._id?.toString(),
       updatedOrder
     );
+
+    // Persistent vendor notification
+    const vId = updatedOrder.vendor?._id || updatedOrder.vendor;
+    if (vId) {
+      const typeMap = {
+        ACCEPTED: "ORDER_ACCEPTED",
+        PREPARING: "ORDER_PREPARING",
+        READY_FOR_PICKUP: "ORDER_PREPARING",
+        CANCELLED: "ORDER_CANCELLED",
+        REJECTED: "ORDER_CANCELLED",
+      };
+      const notifType = typeMap[status] || "SYSTEM";
+      const vendorNotif = await VendorNotification.create({
+        vendor: vId,
+        order: updatedOrder._id,
+        type: notifType,
+        title: `Order #${updatedOrder.orderNumber} ${status}`,
+        message: `Order status updated to ${status}.`,
+        data: {
+          orderNumber: updatedOrder.orderNumber,
+          orderStatus: status,
+        },
+      });
+      emitVendorNotification(vId.toString(), vendorNotif);
+    }
 
     // If order is accepted or ready for pickup, automatically dispatch to nearest available delivery partner
     if (status === "ACCEPTED" || status === "READY_FOR_PICKUP") {

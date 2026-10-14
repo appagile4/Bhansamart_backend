@@ -150,7 +150,7 @@ const orderSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ["Cash on delivery", "esewa", "khalti", "card"],
+      enum: ["Cash on delivery", "esewa", "khalti", "card", "Vendor QR Code (Direct)", "Online Payment"],
       default: "Cash on delivery",
     },
     paymentStatus: {
@@ -255,6 +255,17 @@ const orderSchema = new mongoose.Schema(
       distancePay: { type: Number, default: 20 },
       tip: { type: Number, default: 0 },
       total: { type: Number, default: 60 },
+    },
+    // COD Collection and Custody Tracking
+    codDetails: {
+      cashCollectedByRider: { type: Boolean, default: false },
+      cashCollectedAmount: { type: Number, default: 0 },
+      cashCollectedAt: { type: Date, default: null },
+      cashSubmittedToVendor: { type: Boolean, default: false },
+      cashSubmittedAt: { type: Date, default: null },
+      handoverReceipt: { type: String, default: "" },
+      isDirectVendorQrPaid: { type: Boolean, default: false },
+      directQrPaidAt: { type: Date, default: null },
     },
   },
   {

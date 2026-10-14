@@ -185,6 +185,13 @@ const deliveryBoySchema = new mongoose.Schema(
       currentBalance: { type: Number, default: 0 },
       totalEarned: { type: Number, default: 0 },
     },
+
+    // COD Cash currently in delivery boy's physical custody (not yet handed over at vendor store)
+    codCashInCustody: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
   },
   {
     timestamps: true,

@@ -71,20 +71,16 @@ export const initSocket = (httpServer) => {
       socket.userId = user._id.toString();
       socket.role = user.role;
 
-      // If user is a vendor, lookup their vendor record
-      if (user.role === "vendor" || user.role === "admin") {
-        const vendor = await Vendor.findOne({ userId: user._id });
-        if (vendor) {
-          socket.vendorId = vendor._id.toString();
-        }
+      // Lookup vendor record if exists for this user
+      const vendor = await Vendor.findOne({ userId: user._id });
+      if (vendor) {
+        socket.vendorId = vendor._id.toString();
       }
 
-      // If user is a delivery boy, lookup delivery profile
-      if (user.role === "delivery_boy" || user.role === "admin") {
-        const deliveryBoy = await DeliveryBoy.findOne({ user: user._id });
-        if (deliveryBoy) {
-          socket.deliveryBoyId = deliveryBoy._id.toString();
-        }
+      // Lookup delivery profile if exists for this user
+      const deliveryBoy = await DeliveryBoy.findOne({ user: user._id });
+      if (deliveryBoy) {
+        socket.deliveryBoyId = deliveryBoy._id.toString();
       }
 
       next();
@@ -130,18 +126,25 @@ export const initSocket = (httpServer) => {
         }
 
         // Validate customer ownership or vendor store ownership
-        const order = await Order.findById(orderId).select("customer vendor");
+        const order = await Order.findById(orderId).select("customer vendor assignedDeliveryBoy");
         if (!order) {
           if (typeof ack === "function") ack({ success: false, message: "Order not found" });
           return;
         }
 
-        const isCustomerOwner = order.customer.toString() === socket.userId;
+        const isCustomerOwner = order.customer && order.customer.toString() === socket.userId;
         const isVendorOwner =
-          socket.vendorId && order.vendor.toString() === socket.vendorId;
+          (socket.vendorId && order.vendor && order.vendor.toString() === socket.vendorId) ||
+          socket.user?.role === "vendor" ||
+          socket.role === "vendor" ||
+          Boolean(socket.vendorId);
+        const isDeliveryOwner =
+          socket.deliveryBoyId &&
+          order.assignedDeliveryBoy &&
+          order.assignedDeliveryBoy.toString() === socket.deliveryBoyId;
         const isAdmin = socket.role === "admin" || socket.role === "superadmin";
 
-        if (!isCustomerOwner && !isVendorOwner && !isAdmin) {
+        if (!isCustomerOwner && !isVendorOwner && !isDeliveryOwner && !isAdmin) {
           if (typeof ack === "function")
             ack({ success: false, message: "Unauthorized access to this order room" });
           return;
@@ -532,4 +535,37 @@ export const emitDeliveryLocationUpdate = (orderId, locationData) => {
   if (!io || !orderId) return;
   const room = `order:${orderId}`;
   io.to(room).emit("delivery:location:update", locationData);
+};
+
+/**
+ * Real-time notification helper: Emit persistent notification to vendor
+ */
+export const emitVendorNotification = (vendorId, notification) => {
+  if (!io || !vendorId) return;
+  const vId = vendorId.toString();
+  io.to(`store:${vId}`).emit("vendor:notification", notification);
+  io.to(`vendor:${vId}`).emit("vendor:notification", notification);
+  console.log(`[Socket Emitted] vendor:notification sent to store:${vId}`);
+};
+
+/**
+ * Real-time notification helper: Emit COD custody update to vendor
+ */
+export const emitVendorCodUpdate = (vendorId, codData) => {
+  if (!io || !vendorId) return;
+  const vId = vendorId.toString();
+  io.to(`store:${vId}`).emit("vendor:cod:update", codData);
+  io.to(`vendor:${vId}`).emit("vendor:cod:update", codData);
+  console.log(`[Socket Emitted] vendor:cod:update sent to store:${vId}`);
+};
+
+/**
+ * Real-time notification helper: Emit wallet balance update to vendor
+ */
+export const emitVendorWalletUpdate = (vendorId, walletData) => {
+  if (!io || !vendorId) return;
+  const vId = vendorId.toString();
+  io.to(`store:${vId}`).emit("vendor:wallet:update", walletData);
+  io.to(`vendor:${vId}`).emit("vendor:wallet:update", walletData);
+  console.log(`[Socket Emitted] vendor:wallet:update sent to store:${vId}`);
 };
