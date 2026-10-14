@@ -3,6 +3,7 @@ import Product from "../models/Product.js";
 import Vendor from "../models/Vendor.js";
 import Cart from "../models/Cart.js";
 import Address from "../models/Address.js";
+import DeliveryAssignment from "../models/DeliveryAssignment.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
   emitNewOrderToVendor,
@@ -406,7 +407,9 @@ export const getVendorOrders = async (req, res, next) => {
 
     const [orders, total, pendingCount] = await Promise.all([
       Order.find(query)
+        .select("+pickupOtp.displayCode")
         .populate("customer", "name phone email")
+        .populate("assignedDeliveryBoy", "fullName phone vehicleDetails metrics currentLocation")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
@@ -415,14 +418,44 @@ export const getVendorOrders = async (req, res, next) => {
       Order.countDocuments({ vendor: vendor._id, orderStatus: "PLACED" }),
     ]);
 
+    // Check active delivery assignments for orders that are currently being offered/accepted
+    const orderIds = orders.map((o) => o._id);
+    const activeAssignments = await DeliveryAssignment.find({
+      order: { $in: orderIds },
+      status: { $in: ["OFFERED", "ACCEPTED"] },
+    })
+      .populate("deliveryBoy", "fullName phone vehicleDetails metrics currentLocation")
+      .lean();
+
+    const assignmentMap = new Map();
+    activeAssignments.forEach((a) => {
+      assignmentMap.set(a.order.toString(), a);
+    });
+
+    const formattedOrders = orders.map((o) => {
+      let rider = o.assignedDeliveryBoy || null;
+      let assignment = assignmentMap.get(o._id.toString()) || null;
+
+      if (!rider && assignment && assignment.deliveryBoy) {
+        rider = assignment.deliveryBoy;
+      }
+
+      return {
+        ...o,
+        assignedDeliveryBoy: rider,
+        assignmentStatus: assignment ? assignment.status : rider ? "ASSIGNED" : null,
+        vendorPickupOtp: o.pickupOtp?.displayCode || null,
+      };
+    });
+
     return res.status(200).json({
       success: true,
-      count: orders.length,
+      count: formattedOrders.length,
       total,
       pendingCount,
       totalPages: Math.ceil(total / limitNum) || 1,
       currentPage: pageNum,
-      data: orders,
+      data: formattedOrders,
     });
   } catch (error) {
     next(error);

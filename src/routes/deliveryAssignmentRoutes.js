@@ -7,6 +7,7 @@ import {
   verifyPickupOtp,
   markArrivedAtCustomer,
   verifyDeliveryOtp,
+  cancelActiveDelivery,
 } from "../controllers/deliveryAssignmentController.js";
 import { protect, authorizeRoles } from "../middleware/authMiddleware.js";
 
@@ -22,5 +23,6 @@ router.post("/:orderId/arrived-store", markArrivedAtStore);
 router.post("/:orderId/verify-pickup-otp", verifyPickupOtp);
 router.post("/:orderId/arrived-customer", markArrivedAtCustomer);
 router.post("/:orderId/verify-delivery-otp", verifyDeliveryOtp);
+router.post("/:orderId/cancel-delivery", cancelActiveDelivery);
 
 export default router;

@@ -1,6 +1,7 @@
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import DeliveryAssignment from "../models/DeliveryAssignment.js";
 import Order from "../models/Order.js";
+import Product from "../models/Product.js";
 import DeliveryEarningsLedger from "../models/DeliveryEarningsLedger.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
@@ -554,6 +555,153 @@ export const verifyDeliveryOtp = async (req, res, next) => {
         totalEarnings,
       },
       walletBalance: deliveryBoy.wallet.currentBalance,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Delivery partner cancels active delivery and returns package to vendor
+ * POST /api/delivery/assignments/:orderId/cancel-delivery
+ */
+export const cancelActiveDelivery = async (req, res, next) => {
+  try {
+    const deliveryBoy = await DeliveryBoy.findOne({ user: req.user._id });
+    if (!deliveryBoy) {
+      return next(new AppError("Delivery partner profile not found", 404));
+    }
+
+    const { orderId } = req.params;
+    const { reason = "Customer unavailable", notes = "" } = req.body;
+
+    if (!deliveryBoy.activeOrderId || deliveryBoy.activeOrderId.toString() !== orderId) {
+      return next(
+        new AppError("You do not have an active delivery assignment for this order", 400)
+      );
+    }
+
+    const order = await Order.findById(orderId).populate("vendor customer");
+    if (!order) {
+      return next(new AppError("Order not found", 404));
+    }
+
+    // Update assignment status for current delivery boy to CANCELLED
+    await DeliveryAssignment.findOneAndUpdate(
+      {
+        order: order._id,
+        deliveryBoy: deliveryBoy._id,
+        status: { $in: ["ACCEPTED", "OFFERED"] },
+      },
+      {
+        $set: {
+          status: "CANCELLED",
+          rejectionReason: `Delivery cancelled by partner: ${reason}. Notes: ${notes}`,
+        },
+      }
+    );
+
+    // Free the delivery partner immediately
+    deliveryBoy.activeOrderId = null;
+    deliveryBoy.availability = "ONLINE";
+    await deliveryBoy.save();
+
+    // Increment delivery cancellation attempt counter
+    order.deliveryCancellationCount = (order.deliveryCancellationCount || 0) + 1;
+    order.cancellationDetails.push({
+      cancelledBy: deliveryBoy._id,
+      reason,
+      notes,
+      cancelledAt: new Date(),
+      returnedToVendor: true,
+    });
+
+    const MAX_DELIVERY_ATTEMPTS = 3;
+
+    // Rule: 3 or more failed delivery cancellations permanently cancels the order
+    if (order.deliveryCancellationCount >= MAX_DELIVERY_ATTEMPTS) {
+      order.orderStatus = "CANCELLED";
+      order.assignedDeliveryBoy = null;
+      order.rejectionReason = `Order automatically cancelled after ${order.deliveryCancellationCount} failed delivery attempts. Last reason: ${reason}`;
+      order.statusHistory.push({
+        status: "CANCELLED",
+        timestamp: new Date(),
+        updatedBy: req.user._id,
+        reason: order.rejectionReason,
+      });
+      await order.save();
+
+      // Restock inventory
+      if (Array.isArray(order.items)) {
+        for (const item of order.items) {
+          if (item.product) {
+            await Product.findByIdAndUpdate(item.product, {
+              $inc: { stock: item.quantity, ordersCount: -item.quantity },
+            }).catch(() => {});
+          }
+        }
+      }
+
+      // Notify vendor and customer in real-time
+      emitOrderStatusUpdate(order._id.toString(), order.customer?._id?.toString(), order);
+      emitToOrderRoom(order._id.toString(), "order:delivery:failed_permanent", {
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        deliveryCancellationCount: order.deliveryCancellationCount,
+        maxAttempts: MAX_DELIVERY_ATTEMPTS,
+        reason: order.rejectionReason,
+      });
+
+      return res.status(200).json({
+        success: true,
+        orderCancelled: true,
+        deliveryCancellationCount: order.deliveryCancellationCount,
+        maxAttempts: MAX_DELIVERY_ATTEMPTS,
+        message: `Order permanently cancelled as maximum delivery attempts (${MAX_DELIVERY_ATTEMPTS}) reached. Package returned to store.`,
+        order,
+      });
+    }
+
+    // Under 3 cancellations: Reset order to READY_FOR_PICKUP for re-dispatch
+    order.orderStatus = "READY_FOR_PICKUP";
+    order.assignedDeliveryBoy = null;
+    order.arrivedAtStoreAt = null;
+    order.pickedUpAt = null;
+    order.arrivedAtCustomerAt = null;
+
+    order.statusHistory.push({
+      status: "READY_FOR_PICKUP",
+      timestamp: new Date(),
+      updatedBy: req.user._id,
+      reason: `Delivery attempt ${order.deliveryCancellationCount} cancelled (${reason}). Package returned to store. Re-dispatching to next nearest partner.`,
+    });
+    await order.save();
+
+    // Broadcast update to vendor and customer
+    emitOrderStatusUpdate(order._id.toString(), order.customer?._id?.toString(), order);
+    emitToOrderRoom(order._id.toString(), "order:delivery:returned", {
+      orderId: order._id,
+      orderNumber: order.orderNumber,
+      deliveryCancellationCount: order.deliveryCancellationCount,
+      maxAttempts: MAX_DELIVERY_ATTEMPTS,
+      reason,
+      message: "Package returned to store. System will dispatch to the next nearest partner.",
+    });
+
+    // Re-dispatch order to the next nearest partner (previous partners are excluded automatically)
+    setTimeout(() => {
+      dispatchOrderToNearestPartner(order._id).catch((err) =>
+        console.error("[Re-dispatch after delivery cancellation error]:", err)
+      );
+    }, 1500);
+
+    return res.status(200).json({
+      success: true,
+      orderCancelled: false,
+      deliveryCancellationCount: order.deliveryCancellationCount,
+      maxAttempts: MAX_DELIVERY_ATTEMPTS,
+      message: `Delivery cancelled. Package returned to vendor. Re-dispatching to next nearest partner (Attempt ${order.deliveryCancellationCount} of ${MAX_DELIVERY_ATTEMPTS}).`,
+      order,
     });
   } catch (error) {
     next(error);

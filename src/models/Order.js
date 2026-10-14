@@ -178,6 +178,23 @@ const orderSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    deliveryCancellationCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    cancellationDetails: [
+      {
+        cancelledBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "DeliveryBoy",
+        },
+        reason: { type: String, default: "" },
+        notes: { type: String, default: "" },
+        cancelledAt: { type: Date, default: Date.now },
+        returnedToVendor: { type: Boolean, default: true },
+      },
+    ],
     statusHistory: [statusHistorySchema],
     estimatedDeliveryTime: {
       type: String,

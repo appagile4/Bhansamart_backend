@@ -135,7 +135,7 @@ export const dispatchOrderToNearestPartner = async (orderId) => {
     // Find previous rejections or timeouts for this order to avoid offering repeatedly
     const existingAssignments = await DeliveryAssignment.find({
       order: order._id,
-      status: { $in: ["REJECTED", "TIMED_OUT"] },
+      status: { $in: ["REJECTED", "TIMED_OUT", "CANCELLED"] },
     }).select("deliveryBoy");
 
     const excludeIds = existingAssignments.map((a) => a.deliveryBoy);
@@ -237,11 +237,14 @@ export const dispatchOrderToNearestPartner = async (orderId) => {
         storeName: vendor.businessDetails?.businessName || "Grocery Store",
         address: assignment.pickupLocation.address,
         distanceKm: distanceToStore,
+        coordinates: assignment.pickupLocation.coordinates, // [longitude, latitude]
       },
       drop: {
         customerName: order.customer?.name || "Customer",
         address: assignment.deliveryLocation.address,
+        coordinates: assignment.deliveryLocation.coordinates, // [longitude, latitude]
       },
+      partnerLocation: candidate.currentLocation?.coordinates || [partnerLng, partnerLat],
       itemsCount: order.totalCount,
       estimatedEarnings,
       expiresAt,
