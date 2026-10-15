@@ -404,16 +404,17 @@ export const getVendorOrders = async (req, res, next) => {
     const query = { vendor: vendor._id };
 
     if (status && status !== "all" && status !== "All") {
+      const s = String(status).toLowerCase();
       // Map frontend status labels if needed
-      if (status === "New") {
+      if (s === "new" || s === "pending") {
         query.orderStatus = "PLACED";
-      } else if (status === "Preparing") {
+      } else if (s === "preparing") {
         query.orderStatus = { $in: ["ACCEPTED", "PREPARING"] };
-      } else if (status === "Ready") {
+      } else if (s === "ready") {
         query.orderStatus = "READY_FOR_PICKUP";
-      } else if (status === "Delivered") {
+      } else if (s === "delivered" || s === "completed") {
         query.orderStatus = "DELIVERED";
-      } else if (status === "Cancelled") {
+      } else if (s === "cancelled" || s === "rejected") {
         query.orderStatus = { $in: ["CANCELLED", "REJECTED"] };
       } else {
         query.orderStatus = status;
