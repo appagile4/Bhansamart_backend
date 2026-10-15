@@ -91,6 +91,9 @@ export const getDashboardStats = async (req, res, next) => {
       data: {
         vendorId: vendor._id,
         storeName: vendor.businessDetails?.businessName || req.user.name,
+        deliveryRadiusKm: vendor.deliveryRadiusKm || 5,
+        isStoreOpen: vendor.isStoreOpen !== false,
+        shippingLocations: vendor.shippingLocations || {},
         metrics: {
           totalOrders,
           pendingOrders,

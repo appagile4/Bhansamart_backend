@@ -773,6 +773,10 @@ export const getAllProducts = async (req, res, next) => {
       inStockOnly,
       vendorId,
       city,
+      lat,
+      lng,
+      latitude,
+      longitude,
       page = 1,
       limit = 20,
     } = req.query;
@@ -780,8 +784,12 @@ export const getAllProducts = async (req, res, next) => {
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
 
+    const customerLat = parseFloat(lat || latitude);
+    const customerLng = parseFloat(lng || longitude);
+    const hasCoordinates = !isNaN(customerLat) && !isNaN(customerLng);
+
     // ── 1. Redis Cache Strategy ─────────────────────────────────────────
-    const cacheKey = `products:cat:${(category || "all").toLowerCase()}:sub:${(subCategory || "all").toLowerCase()}:brand:${(brand || "all").toLowerCase()}:search:${(search || "").trim().toLowerCase()}:vendor:${vendorId || "all"}:city:${city || "all"}:min:${minPrice || ""}:max:${maxPrice || ""}:sort:${sortBy}:inStock:${inStockOnly || "false"}:page:${pageNum}:limit:${limitNum}`;
+    const cacheKey = `products:cat:${(category || "all").toLowerCase()}:sub:${(subCategory || "all").toLowerCase()}:brand:${(brand || "all").toLowerCase()}:search:${(search || "").trim().toLowerCase()}:vendor:${vendorId || "all"}:city:${city || "all"}:coord:${hasCoordinates ? `${customerLat.toFixed(3)},${customerLng.toFixed(3)}` : "none"}:min:${minPrice || ""}:max:${maxPrice || ""}:sort:${sortBy}:inStock:${inStockOnly || "false"}:page:${pageNum}:limit:${limitNum}`;
 
     const cachedResult = await getCache(cacheKey);
     if (cachedResult) {
@@ -797,11 +805,71 @@ export const getAllProducts = async (req, res, next) => {
       status: { $ne: "Draft" },
     };
 
-    // Filter by active eligible vendors
+    let eligibleVendorIds = [];
+    let isOutsideDeliveryZone = false;
+
+    // Filter by active eligible vendors whose delivery radius encompasses customer coordinates
     if (vendorId && vendorId !== "all" && vendorId.match(/^[0-9a-fA-F]{24}$/)) {
       query.vendor = vendorId;
+    } else if (hasCoordinates) {
+      try {
+        const nearbyVendors = await Vendor.aggregate([
+          {
+            $geoNear: {
+              near: { type: "Point", coordinates: [customerLng, customerLat] },
+              distanceField: "distanceMeters",
+              spherical: true,
+              query: {
+                status: { $in: ["approved", "active"] },
+                isStoreOpen: { $ne: false },
+              },
+            },
+          },
+          {
+            $match: {
+              $expr: {
+                $lte: [
+                  "$distanceMeters",
+                  { $multiply: [{ $ifNull: ["$deliveryRadiusKm", 5] }, 1000] },
+                ],
+              },
+            },
+          },
+          { $project: { _id: 1 } },
+        ]);
+        eligibleVendorIds = nearbyVendors.map((v) => v._id);
+      } catch (geoErr) {
+        console.warn("[getAllProducts geoNear fallback]:", geoErr.message);
+        const { calculateDistanceKm } = await import("../utils/dispatchEngine.js");
+        const allVendors = await Vendor.find({
+          status: { $in: ["approved", "active"] },
+          isStoreOpen: { $ne: false },
+        }).lean();
+        eligibleVendorIds = allVendors
+          .filter((v) => {
+            const vLng =
+              v.shippingLocations?.longitude || v.location?.coordinates?.[0] || 85.324;
+            const vLat =
+              v.shippingLocations?.latitude || v.location?.coordinates?.[1] || 27.7172;
+            const dist = calculateDistanceKm(customerLat, customerLng, vLat, vLng);
+            const radius = v.deliveryRadiusKm || 5;
+            return dist <= radius;
+          })
+          .map((v) => v._id);
+      }
+
+      if (eligibleVendorIds.length === 0) {
+        isOutsideDeliveryZone = true;
+        // Strictly return empty list when no vendor delivers to this location
+        query.vendor = { $in: [] };
+      } else {
+        query.vendor = { $in: eligibleVendorIds };
+      }
     } else {
-      const activeVendorQuery = { status: { $in: ["approved", "active"] } };
+      const activeVendorQuery = {
+        status: { $in: ["approved", "active"] },
+        isStoreOpen: { $ne: false },
+      };
       if (city && city.trim()) {
         const cityRegex = new RegExp(city.trim(), "i");
         activeVendorQuery.$or = [
@@ -904,6 +972,8 @@ export const getAllProducts = async (req, res, next) => {
       totalPages,
       currentPage: pageNum,
       hasMore: pageNum < totalPages,
+      eligibleVendorsCount: eligibleVendorIds.length,
+      isOutsideDeliveryZone,
       products,
     };
 

@@ -2,6 +2,7 @@ import User from "../models/User.js";
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import { generateAccessToken, generateTokenAndSetCookie } from "../utils/generateToken.js";
+import { uploadToCloudinary, deleteFromCloudinary } from "../utils/cloudinaryUpload.js";
 
 /**
  * Register a new delivery partner
@@ -150,14 +151,18 @@ export const loginDeliveryBoy = async (req, res, next) => {
  */
 export const getMyDeliveryProfile = async (req, res, next) => {
   try {
-    const deliveryBoy = await DeliveryBoy.findOne({ user: req.user._id }).populate("user", "name email phone isActive status");
+    const deliveryBoy = await DeliveryBoy.findOne({ user: req.user._id }).populate("user", "name email phone isActive status avatar");
     if (!deliveryBoy) {
       return next(new AppError("Delivery partner profile not found", 404));
     }
 
+    const masked = deliveryBoy.getMaskedProfile();
+    // Provide bankDetails so the partner can review their configured payout info
+    masked.bankDetails = deliveryBoy.bankDetails;
+
     res.status(200).json({
       success: true,
-      deliveryBoy: deliveryBoy.getMaskedProfile(),
+      deliveryBoy: masked,
       canGoOnline: deliveryBoy.canGoOnline(),
       documentsVerified: deliveryBoy.areAllDocumentsVerified(),
     });
@@ -199,10 +204,117 @@ export const updateDeliveryProfile = async (req, res, next) => {
 
     await deliveryBoy.save();
 
+    const masked = deliveryBoy.getMaskedProfile();
+    masked.bankDetails = deliveryBoy.bankDetails;
+
     res.status(200).json({
       success: true,
       message: "Profile updated successfully",
-      deliveryBoy: deliveryBoy.getMaskedProfile(),
+      deliveryBoy: masked,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Upload Profile Photo to Cloudinary & Store URL on MongoDB
+ * POST /api/delivery/auth/profile-photo
+ */
+export const uploadDeliveryProfilePhoto = async (req, res, next) => {
+  try {
+    const deliveryBoy = await DeliveryBoy.findOne({ user: req.user._id });
+    if (!deliveryBoy) {
+      return next(new AppError("Delivery partner profile not found", 404));
+    }
+
+    let fileSource = null;
+    if (req.file) {
+      fileSource = req.file.buffer;
+    } else if (req.body.image || req.body.profilePhoto || req.body.base64) {
+      fileSource = req.body.image || req.body.profilePhoto || req.body.base64;
+    }
+
+    if (!fileSource) {
+      return next(new AppError("Please select or capture an image to upload.", 400));
+    }
+
+    // Delete old profile photo from Cloudinary if exists
+    if (deliveryBoy.profilePhoto?.publicId) {
+      await deleteFromCloudinary(deliveryBoy.profilePhoto.publicId).catch(() => {});
+    } else if (deliveryBoy.profilePhoto?.url) {
+      await deleteFromCloudinary(deliveryBoy.profilePhoto.url).catch(() => {});
+    }
+
+    // Upload to Cloudinary in delivery profiles folder
+    const uploadRes = await uploadToCloudinary(fileSource, "bhansamart/delivery/profiles");
+
+    deliveryBoy.profilePhoto = {
+      url: uploadRes.secure_url,
+      publicId: uploadRes.public_id,
+    };
+    await deliveryBoy.save();
+
+    // Also update User avatar for consistency across the platform
+    await User.findByIdAndUpdate(req.user._id, { avatar: uploadRes.secure_url });
+
+    const masked = deliveryBoy.getMaskedProfile();
+    masked.bankDetails = deliveryBoy.bankDetails;
+
+    res.status(200).json({
+      success: true,
+      message: "Profile photo uploaded to Cloudinary successfully.",
+      profilePhoto: deliveryBoy.profilePhoto,
+      deliveryBoy: masked,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Update Bank & Wallet Payout Details
+ * PUT /api/delivery/auth/bank-details
+ */
+export const updateDeliveryBankDetails = async (req, res, next) => {
+  try {
+    const deliveryBoy = await DeliveryBoy.findOne({ user: req.user._id });
+    if (!deliveryBoy) {
+      return next(new AppError("Delivery partner profile not found", 404));
+    }
+
+    const {
+      accountHolderName,
+      accountNumber,
+      ifscCode,
+      bankName,
+      upiId,
+    } = req.body.bankDetails || req.body;
+
+    if (!upiId && (!accountNumber || !ifscCode)) {
+      return next(
+        new AppError("Please provide either Bank Account details (Account Number + IFSC) or a UPI / eSewa ID for payouts.", 400)
+      );
+    }
+
+    deliveryBoy.bankDetails = {
+      accountHolderName: accountHolderName ? String(accountHolderName).trim() : deliveryBoy.bankDetails.accountHolderName,
+      accountNumber: accountNumber ? String(accountNumber).trim() : deliveryBoy.bankDetails.accountNumber,
+      ifscCode: ifscCode ? String(ifscCode).toUpperCase().trim() : deliveryBoy.bankDetails.ifscCode,
+      bankName: bankName ? String(bankName).trim() : deliveryBoy.bankDetails.bankName,
+      upiId: upiId ? String(upiId).trim() : deliveryBoy.bankDetails.upiId,
+    };
+
+    await deliveryBoy.save();
+
+    const masked = deliveryBoy.getMaskedProfile();
+    masked.bankDetails = deliveryBoy.bankDetails;
+
+    res.status(200).json({
+      success: true,
+      message: "Bank & Wallet payout details updated successfully.",
+      bankDetails: deliveryBoy.bankDetails,
+      deliveryBoy: masked,
     });
   } catch (error) {
     next(error);

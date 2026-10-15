@@ -4,6 +4,9 @@ import {
   updateVendorSection,
   uploadVendorLogo,
   getApprovedVendors,
+  updateDeliveryRadius,
+  updateStoreStatus,
+  getNearbyVendors,
 } from "../controllers/vendorController.js";
 import {
   getDashboardStats,
@@ -25,6 +28,7 @@ const router = Router();
 
 // Public routes
 router.get("/approved", getApprovedVendors);
+router.get("/nearby", getNearbyVendors);
 
 // Protected vendor routes
 router.use(protect, authorizeRoles("vendor", "admin"));
@@ -33,6 +37,8 @@ router.use(protect, authorizeRoles("vendor", "admin"));
 router.get("/profile", getMyVendor);
 router.put("/update-section", updateVendorSection);
 router.post("/upload-logo", uploadSingleImage("logo"), uploadVendorLogo);
+router.put("/delivery-radius", updateDeliveryRadius);
+router.put("/store-status", updateStoreStatus);
 
 // Dashboard Live Stats
 router.get("/dashboard/stats", getDashboardStats);

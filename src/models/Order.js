@@ -78,6 +78,8 @@ const deliveryAddressSchema = new mongoose.Schema(
     landmark: { type: String, default: "" },
     phone: { type: String, required: true },
     type: { type: String, default: "Home" },
+    latitude: { type: Number, default: null },
+    longitude: { type: Number, default: null },
   },
   { _id: false }
 );

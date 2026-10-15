@@ -1,15 +1,18 @@
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import { AppError } from "../middleware/errorMiddleware.js";
+import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
 
 const VALID_DOC_TYPES = ["panCard", "aadhaarCard", "drivingLicense", "vehicleRc"];
 
 /**
- * Submit / Update document for verification
+ * Submit / Update document for verification with Cloudinary upload
  * POST /api/delivery/documents/upload
  */
 export const uploadOrUpdateDocument = async (req, res, next) => {
   try {
-    const { documentType, documentNumber, frontUrl, backUrl, expiryDate } = req.body;
+    const { documentType, documentNumber, expiryDate } = req.body;
+    let frontUrl = req.body.frontUrl || "";
+    let backUrl = req.body.backUrl || "";
 
     if (!documentType || !VALID_DOC_TYPES.includes(documentType)) {
       return next(
@@ -20,8 +23,64 @@ export const uploadOrUpdateDocument = async (req, res, next) => {
       );
     }
 
+    // 1. Handle file upload via Multer (multipart/form-data)
+    if (req.files) {
+      if (req.files.frontImage?.[0]) {
+        const uploadRes = await uploadToCloudinary(
+          req.files.frontImage[0].buffer,
+          "bhansamart/delivery/documents"
+        );
+        frontUrl = uploadRes.secure_url;
+      }
+      if (req.files.backImage?.[0]) {
+        const uploadRes = await uploadToCloudinary(
+          req.files.backImage[0].buffer,
+          "bhansamart/delivery/documents"
+        );
+        backUrl = uploadRes.secure_url;
+      }
+      if (!frontUrl && req.files.image?.[0]) {
+        const uploadRes = await uploadToCloudinary(
+          req.files.image[0].buffer,
+          "bhansamart/delivery/documents"
+        );
+        frontUrl = uploadRes.secure_url;
+      }
+      if (!frontUrl && req.files.file?.[0]) {
+        const uploadRes = await uploadToCloudinary(
+          req.files.file[0].buffer,
+          "bhansamart/delivery/documents"
+        );
+        frontUrl = uploadRes.secure_url;
+      }
+    } else if (req.file) {
+      const uploadRes = await uploadToCloudinary(
+        req.file.buffer,
+        "bhansamart/delivery/documents"
+      );
+      frontUrl = uploadRes.secure_url;
+    }
+
+    // 2. Also handle base64 image strings if provided in JSON
+    if (!frontUrl && req.body.frontImageBase64) {
+      const uploadRes = await uploadToCloudinary(
+        req.body.frontImageBase64,
+        "bhansamart/delivery/documents"
+      );
+      frontUrl = uploadRes.secure_url;
+    }
+    if (!backUrl && req.body.backImageBase64) {
+      const uploadRes = await uploadToCloudinary(
+        req.body.backImageBase64,
+        "bhansamart/delivery/documents"
+      );
+      backUrl = uploadRes.secure_url;
+    }
+
     if (!frontUrl && !documentNumber) {
-      return next(new AppError("Front image URL or document number is required", 400));
+      return next(
+        new AppError("Document photo (file) or document number is required", 400)
+      );
     }
 
     const deliveryBoy = await DeliveryBoy.findOne({ user: req.user._id });
@@ -31,6 +90,7 @@ export const uploadOrUpdateDocument = async (req, res, next) => {
 
     const currentDoc = deliveryBoy.documents[documentType] || {};
 
+    // 3. Save to MongoDB
     deliveryBoy.documents[documentType] = {
       documentNumber: documentNumber ? String(documentNumber).trim() : currentDoc.documentNumber,
       frontUrl: frontUrl || currentDoc.frontUrl,
@@ -51,9 +111,10 @@ export const uploadOrUpdateDocument = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      message: `${documentType} submitted for verification successfully.`,
+      message: `${documentType} uploaded to Cloudinary and submitted for verification successfully.`,
       documentType,
       documentStatus: deliveryBoy.documents[documentType].status,
+      frontUrl: deliveryBoy.documents[documentType].frontUrl,
       allVerified: deliveryBoy.areAllDocumentsVerified(),
       documents: deliveryBoy.getMaskedProfile().documents,
     });

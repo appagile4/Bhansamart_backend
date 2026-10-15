@@ -229,6 +229,15 @@ export const initSocket = (httpServer) => {
         // Notify customer in real-time
         emitOrderStatusUpdate(order._id.toString(), order.customer?._id?.toString(), order);
 
+        // Automatically dispatch to nearest available delivery partner
+        import("../utils/dispatchEngine.js")
+          .then(({ dispatchOrderToNearestPartner }) => {
+            dispatchOrderToNearestPartner(order._id).catch((err) => {
+              console.warn("[Auto-dispatch from socket error]:", err.message);
+            });
+          })
+          .catch(() => {});
+
         // Acknowledge back to vendor
         if (typeof ack === "function") {
           ack({ success: true, order });
@@ -401,6 +410,100 @@ export const initSocket = (httpServer) => {
       }
     });
 
+    // ── 9. Client Event: Customer Location Update & Proximity Discovery ──
+    let lastCustomerLocationUpdate = 0;
+    socket.on("customer:location:update", async (data, ack) => {
+      try {
+        const now = Date.now();
+        // Throttle updates: max 1 per 2 seconds
+        if (now - lastCustomerLocationUpdate < 2000) {
+          if (typeof ack === "function") ack({ success: true, throttled: true });
+          return;
+        }
+        lastCustomerLocationUpdate = now;
+
+        const lat = parseFloat(data?.latitude);
+        const lng = parseFloat(data?.longitude);
+        if (isNaN(lat) || isNaN(lng)) {
+          if (typeof ack === "function") ack({ success: false, message: "Invalid coordinates" });
+          return;
+        }
+
+        // Query active, open vendors where distance <= vendor.deliveryRadiusKm
+        let eligibleVendors = [];
+        try {
+          eligibleVendors = await Vendor.aggregate([
+            {
+              $geoNear: {
+                near: { type: "Point", coordinates: [lng, lat] },
+                distanceField: "distanceMeters",
+                spherical: true,
+                query: {
+                  status: { $in: ["approved", "active"] },
+                  isStoreOpen: { $ne: false },
+                },
+              },
+            },
+            {
+              $match: {
+                $expr: {
+                  $lte: [
+                    "$distanceMeters",
+                    { $multiply: [{ $ifNull: ["$deliveryRadiusKm", 5] }, 1000] },
+                  ],
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                businessDetails: 1,
+                sellerDetails: 1,
+                shippingLocations: 1,
+                deliveryRadiusKm: 1,
+                isStoreOpen: 1,
+                distanceMeters: 1,
+                distanceKm: { $round: [{ $divide: ["$distanceMeters", 1000] }, 1] },
+              },
+            },
+          ]);
+        } catch (geoErr) {
+          const vendors = await Vendor.find({
+            status: { $in: ["approved", "active"] },
+            isStoreOpen: { $ne: false },
+          }).lean();
+          const { calculateDistanceKm } = await import("../utils/dispatchEngine.js");
+          eligibleVendors = vendors
+            .map((v) => {
+              const vLng = v.shippingLocations?.longitude || v.location?.coordinates?.[0] || 85.324;
+              const vLat = v.shippingLocations?.latitude || v.location?.coordinates?.[1] || 27.7172;
+              const dist = calculateDistanceKm(lat, lng, vLat, vLng);
+              const radius = v.deliveryRadiusKm || 5;
+              return { ...v, distanceKm: dist, isEligible: dist <= radius };
+            })
+            .filter((v) => v.isEligible);
+        }
+
+        const payload = {
+          count: eligibleVendors.length,
+          vendors: eligibleVendors.map((v) => ({
+            id: v._id,
+            name: v.businessDetails?.businessName || v.sellerDetails?.sellerName || "Store",
+            distanceKm: v.distanceKm,
+            deliveryRadiusKm: v.deliveryRadiusKm || 5,
+          })),
+          coordinates: { latitude: lat, longitude: lng },
+          timestamp: new Date(),
+        };
+
+        socket.emit("customer:nearby-vendors:update", payload);
+        if (typeof ack === "function") ack({ success: true, ...payload });
+      } catch (err) {
+        console.error("[customer:location:update error]:", err);
+        if (typeof ack === "function") ack({ success: false, message: err.message });
+      }
+    });
+
     socket.on("disconnect", (reason) => {
       console.log(`[Socket Disconnected] ${socket.id} (Reason: ${reason})`);
     });
@@ -568,4 +671,34 @@ export const emitVendorWalletUpdate = (vendorId, walletData) => {
   io.to(`store:${vId}`).emit("vendor:wallet:update", walletData);
   io.to(`vendor:${vId}`).emit("vendor:wallet:update", walletData);
   console.log(`[Socket Emitted] vendor:wallet:update sent to store:${vId}`);
+};
+
+/**
+ * Real-time notification helper: Broadcast vendor delivery radius update to all active customers
+ */
+export const emitDeliveryRadiusUpdated = (vendorId, deliveryRadiusKm, storeName = "") => {
+  if (!io || !vendorId) return;
+  const payload = {
+    vendorId: vendorId.toString(),
+    deliveryRadiusKm,
+    storeName,
+    updatedAt: new Date(),
+  };
+  io.emit("vendor:delivery-radius:updated", payload);
+  console.log(`[Socket Emitted] vendor:delivery-radius:updated for vendor ${vendorId}: ${deliveryRadiusKm}km`);
+};
+
+/**
+ * Real-time notification helper: Broadcast vendor store open/close availability
+ */
+export const emitVendorAvailabilityChanged = (vendorId, isStoreOpen, storeName = "") => {
+  if (!io || !vendorId) return;
+  const payload = {
+    vendorId: vendorId.toString(),
+    isStoreOpen,
+    storeName,
+    updatedAt: new Date(),
+  };
+  io.emit("vendor:availability:changed", payload);
+  console.log(`[Socket Emitted] vendor:availability:changed for vendor ${vendorId}: isStoreOpen=${isStoreOpen}`);
 };
