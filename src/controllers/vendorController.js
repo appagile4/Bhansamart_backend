@@ -1,5 +1,6 @@
 import Vendor from "../models/Vendor.js";
 import User from "../models/User.js";
+import Order from "../models/Order.js";
 import { uploadToCloudinary, deleteFromCloudinary } from "../utils/cloudinaryUpload.js";
 import {
   emitDeliveryRadiusUpdated,
@@ -421,3 +422,110 @@ export const getNearbyVendors = async (req, res) => {
     });
   }
 };
+
+/**
+ * @desc    Get customers list & purchase stats for current vendor
+ * @route   GET /api/vendor/customers
+ * @access  Private (Vendor)
+ */
+export const getVendorCustomers = async (req, res) => {
+  try {
+    let vendor = await Vendor.findOne({ userId: req.user._id });
+    if (!vendor && (req.user.role === "vendor" || req.user.role === "admin")) {
+      vendor = await Vendor.findById(req.user._id);
+    }
+
+    if (!vendor) {
+      return res.status(404).json({
+        success: false,
+        message: "Vendor profile not found.",
+      });
+    }
+
+    const customersData = await Order.aggregate([
+      { $match: { vendor: vendor._id } },
+      {
+        $group: {
+          _id: "$customer",
+          orderCount: { $sum: 1 },
+          productCount: { $sum: "$totalCount" },
+          totalSpent: {
+            $sum: {
+              $cond: [
+                { $in: ["$orderStatus", ["CANCELLED", "REJECTED"]] },
+                0,
+                "$totalAmount",
+              ],
+            },
+          },
+          cancelledCount: {
+            $sum: {
+              $cond: [
+                { $in: ["$orderStatus", ["CANCELLED", "REJECTED"]] },
+                1,
+                0,
+              ],
+            },
+          },
+          deliveredCount: {
+            $sum: {
+              $cond: [{ $eq: ["$orderStatus", "DELIVERED"] }, 1, 0],
+            },
+          },
+          lastOrderDate: { $max: "$createdAt" },
+          lastDeliveryAddress: { $last: "$deliveryAddress" },
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "customerInfo",
+        },
+      },
+      { $unwind: { path: "$customerInfo", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 1,
+          customerId: "$_id",
+          name: {
+            $ifNull: [
+              "$customerInfo.name",
+              { $ifNull: ["$lastDeliveryAddress.name", "Customer"] },
+            ],
+          },
+          email: { $ifNull: ["$customerInfo.email", ""] },
+          phone: {
+            $ifNull: [
+              "$customerInfo.phone",
+              { $ifNull: ["$lastDeliveryAddress.phone", "N/A"] },
+            ],
+          },
+          avatar: { $ifNull: ["$customerInfo.avatar", ""] },
+          orderCount: "$orderCount",
+          productCount: "$productCount",
+          cancelledCount: "$cancelledCount",
+          deliveredCount: "$deliveredCount",
+          totalSpent: "$totalSpent",
+          lastOrderDate: "$lastOrderDate",
+          lastAddress: "$lastDeliveryAddress.addressLine",
+        },
+      },
+      { $sort: { lastOrderDate: -1 } },
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count: customersData.length,
+      data: customersData,
+    });
+  } catch (error) {
+    console.error("[Get Vendor Customers Error]:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch vendor customers.",
+    });
+  }
+};
+

@@ -7,6 +7,7 @@ import {
   updateDeliveryRadius,
   updateStoreStatus,
   getNearbyVendors,
+  getVendorCustomers,
 } from "../controllers/vendorController.js";
 import {
   getDashboardStats,
@@ -42,6 +43,9 @@ router.put("/store-status", updateStoreStatus);
 
 // Dashboard Live Stats
 router.get("/dashboard/stats", getDashboardStats);
+
+// Customers
+router.get("/customers", getVendorCustomers);
 
 // Transactions & Wallet
 router.get("/transactions", getVendorTransactions);
