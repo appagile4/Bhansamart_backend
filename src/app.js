@@ -23,6 +23,7 @@ import adminDeliveryRoutes from "./routes/adminDeliveryRoutes.js";
 import referralRoutes, { rewardsRouter } from "./routes/referralRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import adminReferralRoutes from "./routes/adminReferralRoutes.js";
+import paymentMethodRoutes from "./routes/paymentMethodRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
@@ -119,6 +120,7 @@ app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/address", addressRoutes);
 app.use("/api/orders", orderRoutes);
+app.use("/api/payment-methods", paymentMethodRoutes);
 
 // Delivery Boy Module Routes
 app.use("/api/delivery/auth", deliveryAuthRoutes);
