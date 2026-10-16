@@ -22,6 +22,11 @@ import {
   updatePaymentQrSettings,
   uploadPaymentQrImage,
 } from "../controllers/vendorFinanceController.js";
+import {
+  createBrandRequest,
+  getMyBrandRequests,
+} from "../controllers/brandController.js";
+import { createAttribute } from "../controllers/attributeController.js";
 import { protect, authorizeRoles } from "../middleware/authMiddleware.js";
 import { uploadSingleImage } from "../middleware/uploadMiddleware.js";
 
@@ -64,5 +69,16 @@ router.post("/cod/confirm-handover", confirmCodHandover);
 router.get("/payment-qr", getPaymentQrSettings);
 router.put("/payment-qr", updatePaymentQrSettings);
 router.post("/payment-qr/upload", uploadSingleImage("qrCode"), uploadPaymentQrImage);
+
+// Vendor Brand Requests & Submissions
+router.get("/brand-requests", getMyBrandRequests);
+router.post(
+  "/brand-requests",
+  uploadSingleImage("logo"),
+  createBrandRequest
+);
+
+// Vendor Attributes Management
+router.post("/attributes", createAttribute);
 
 export default router;

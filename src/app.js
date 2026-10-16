@@ -24,6 +24,8 @@ import referralRoutes, { rewardsRouter } from "./routes/referralRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import adminReferralRoutes from "./routes/adminReferralRoutes.js";
 import paymentMethodRoutes from "./routes/paymentMethodRoutes.js";
+import brandRoutes from "./routes/brandRoutes.js";
+import attributeRoutes from "./routes/attributeRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
@@ -121,6 +123,8 @@ app.use("/api/cart", cartRoutes);
 app.use("/api/address", addressRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/payment-methods", paymentMethodRoutes);
+app.use("/api/brands", brandRoutes);
+app.use("/api/attributes", attributeRoutes);
 
 // Delivery Boy Module Routes
 app.use("/api/delivery/auth", deliveryAuthRoutes);

@@ -1,5 +1,6 @@
 import Product from "../models/Product.js";
 import Vendor from "../models/Vendor.js";
+import Brand from "../models/Brand.js";
 import {
   uploadProductImageToCloudinary,
   deleteFromCloudinary,
@@ -117,8 +118,46 @@ export const createProduct = async (req, res, next) => {
           typeof req.body.visibility === "string"
             ? JSON.parse(req.body.visibility)
             : req.body.visibility;
+      } catch {}
+    }
+
+    // Attributes parsing
+    let parsedAttributes = [];
+    if (req.body.attributes) {
+      try {
+        parsedAttributes =
+          typeof req.body.attributes === "string"
+            ? JSON.parse(req.body.attributes)
+            : req.body.attributes;
       } catch {
-        // fallback
+        parsedAttributes = [];
+      }
+    }
+
+    // Brand resolution & verification
+    let resolvedBrandName = brand ? String(brand).trim() : "Generic / Store Brand";
+    let resolvedBrandRef = null;
+
+    if (req.body.brandRef) {
+      const bDoc = await Brand.findById(req.body.brandRef);
+      if (bDoc) {
+        if (bDoc.status !== "APPROVED") {
+          return res.status(400).json({
+            success: false,
+            message: `Brand "${bDoc.name}" is pending approval and cannot be assigned to products yet.`,
+          });
+        }
+        resolvedBrandRef = bDoc._id;
+        resolvedBrandName = bDoc.name;
+      }
+    } else if (brand && brand !== "Generic / Store Brand") {
+      const bDoc = await Brand.findOne({
+        name: { $regex: `^${String(brand).trim()}$`, $options: "i" },
+        status: "APPROVED",
+      });
+      if (bDoc) {
+        resolvedBrandRef = bDoc._id;
+        resolvedBrandName = bDoc.name;
       }
     }
 
@@ -204,7 +243,9 @@ export const createProduct = async (req, res, next) => {
       category: category.trim(),
       subCategory: subCategory ? subCategory.trim() : "",
       supplierName: supplierName ? supplierName.trim() : "",
-      brand: brand ? brand.trim() : "Generic / Store Brand",
+      brand: resolvedBrandName,
+      brandRef: resolvedBrandRef,
+      attributes: parsedAttributes,
       expirationDate: expirationDate ? expirationDate.trim() : "",
       price: numPrice,
       originalPrice: numOriginalPrice,
@@ -346,15 +387,13 @@ export const getProductById = async (req, res, next) => {
     let product;
 
     if (id.match(/^[0-9a-fA-F]{24}$/)) {
-      product = await Product.findOne({ _id: id, isDeleted: false }).populate(
-        "vendor",
-        "businessDetails sellerDetails brandDetails"
-      );
+      product = await Product.findOne({ _id: id, isDeleted: false })
+        .populate("vendor", "businessDetails sellerDetails brandDetails")
+        .populate("brandRef", "name logo categories status");
     } else {
-      product = await Product.findOne({ slug: id, isDeleted: false }).populate(
-        "vendor",
-        "businessDetails sellerDetails brandDetails"
-      );
+      product = await Product.findOne({ slug: id, isDeleted: false })
+        .populate("vendor", "businessDetails sellerDetails brandDetails")
+        .populate("brandRef", "name logo categories status");
     }
 
     if (!product) {
@@ -634,10 +673,45 @@ export const updateProduct = async (req, res, next) => {
         updates.tags = JSON.parse(updates.tags);
       } catch {}
     }
+    if (updates.attributes && typeof updates.attributes === "string") {
+      try {
+        updates.attributes = JSON.parse(updates.attributes);
+      } catch {}
+    }
     if (updates.visibility && typeof updates.visibility === "string") {
       try {
         updates.visibility = JSON.parse(updates.visibility);
       } catch {}
+    }
+
+    if (updates.brandRef) {
+      const bDoc = await Brand.findById(updates.brandRef);
+      if (bDoc) {
+        if (bDoc.status !== "APPROVED") {
+          return res.status(400).json({
+            success: false,
+            message: `Brand "${bDoc.name}" is pending approval and cannot be assigned to products yet.`,
+          });
+        }
+        updates.brandRef = bDoc._id;
+        updates.brand = bDoc.name;
+      }
+    } else if (updates.brand !== undefined) {
+      if (updates.brand && updates.brand !== "Generic / Store Brand") {
+        const bDoc = await Brand.findOne({
+          name: { $regex: `^${String(updates.brand).trim()}$`, $options: "i" },
+          status: "APPROVED",
+        });
+        if (bDoc) {
+          updates.brandRef = bDoc._id;
+          updates.brand = bDoc.name;
+        } else {
+          updates.brand = String(updates.brand).trim();
+        }
+      } else {
+        updates.brand = "Generic / Store Brand";
+        updates.brandRef = null;
+      }
     }
 
     const updatedProduct = await Product.findByIdAndUpdate(id, updates, {

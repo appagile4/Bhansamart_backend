@@ -78,6 +78,12 @@ const productSchema = new mongoose.Schema(
       default: "Generic / Store Brand",
       index: true,
     },
+    brandRef: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Brand",
+      default: null,
+      index: true,
+    },
     expirationDate: {
       type: String,
       default: "",
@@ -143,8 +149,20 @@ const productSchema = new mongoose.Schema(
       default: "",
     },
 
-    // 5. Variants
+    // 5. Variants & Attributes
     variants: [variantSchema],
+    attributes: [
+      {
+        attributeId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Attribute",
+          default: null,
+        },
+        name: { type: String, trim: true },
+        value: { type: String, trim: true, default: "" },
+        values: [{ type: String, trim: true }],
+      },
+    ],
 
     // 6. Tags
     tags: [
