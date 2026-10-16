@@ -60,6 +60,27 @@ const userSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Referral & Reward Points
+    referralCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      uppercase: true,
+      trim: true,
+      index: true,
+    },
+    referredBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+    rewardPoints: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
     // Vendor / Delivery specific status
     status: {
       type: String,

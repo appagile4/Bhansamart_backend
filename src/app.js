@@ -20,6 +20,9 @@ import deliveryLocationRoutes from "./routes/deliveryLocationRoutes.js";
 import deliveryAssignmentRoutes from "./routes/deliveryAssignmentRoutes.js";
 import deliveryEarningsRoutes from "./routes/deliveryEarningsRoutes.js";
 import adminDeliveryRoutes from "./routes/adminDeliveryRoutes.js";
+import referralRoutes, { rewardsRouter } from "./routes/referralRoutes.js";
+import notificationRoutes from "./routes/notificationRoutes.js";
+import adminReferralRoutes from "./routes/adminReferralRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
@@ -128,6 +131,17 @@ app.use("/api/delivery/earnings", deliveryEarningsRoutes);
 
 // Admin Delivery Management Routes
 app.use("/api/admin/delivery", adminDeliveryRoutes);
+
+// Referral & Reward Points Module Routes (v1 & unversioned)
+app.use("/api/v1/referrals", referralRoutes);
+app.use("/api/v1/rewards", rewardsRouter);
+app.use("/api/v1/notifications", notificationRoutes);
+app.use("/api/v1/admin/referrals", adminReferralRoutes);
+
+app.use("/api/referrals", referralRoutes);
+app.use("/api/rewards", rewardsRouter);
+app.use("/api/notifications", notificationRoutes);
+
 
 
 // 7. Catch Unhandled 404 Routes

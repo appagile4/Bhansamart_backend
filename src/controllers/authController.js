@@ -15,6 +15,13 @@ import {
   deleteFromCloudinary,
 } from "../utils/cloudinaryUpload.js";
 import { AppError } from "../middleware/errorMiddleware.js";
+import Referral from "../models/Referral.js";
+import {
+  generateUniqueReferralCode,
+  validateReferralCode,
+  createReferralAttribution,
+  processReferralReward,
+} from "../services/referralService.js";
 
 /**
  * @desc    Register a new user
@@ -23,7 +30,7 @@ import { AppError } from "../middleware/errorMiddleware.js";
  */
 export const register = async (req, res, next) => {
   try {
-    const { name, email, password, address, dateOfBirth, gender } = req.body;
+    const { name, email, password, address, dateOfBirth, gender, referralCode } = req.body;
 
     // Check if user already exists
     const existingUser = await User.findOne({ email });
@@ -39,7 +46,20 @@ export const register = async (req, res, next) => {
       return next(new AppError("An account with this email already exists.", 400));
     }
 
-    // Create user directly with verified status
+    // 1. Validate optional referral code before creating account
+    let validatedReferrer = null;
+    if (referralCode && typeof referralCode === "string" && referralCode.trim() !== "") {
+      try {
+        validatedReferrer = await validateReferralCode(referralCode);
+      } catch (refErr) {
+        return next(new AppError(refErr.message || "Invalid referral code.", 400));
+      }
+    }
+
+    // 2. Generate unique referral code for the new customer
+    const newUserReferralCode = await generateUniqueReferralCode(name);
+
+    // 3. Create user directly with verified status
     const user = await User.create({
       name,
       email,
@@ -48,9 +68,35 @@ export const register = async (req, res, next) => {
       dateOfBirth,
       gender,
       role: "customer",
+      referralCode: newUserReferralCode,
+      referredBy: validatedReferrer ? validatedReferrer.referrerId : null,
       isEmailVerified: true,
       lastLoginAt: new Date(),
     });
+
+    // 4. Process Referral Attribution & Atomic Reward if referred
+    if (validatedReferrer) {
+      try {
+        const referral = await createReferralAttribution({
+          referrerId: validatedReferrer.referrerId,
+          referredId: user._id,
+          referralCode,
+        });
+
+        // If newly created user is active/verified, process reward atomically
+        if (referral && user.isEmailVerified) {
+          await processReferralReward({ referralId: referral._id });
+          const updatedUser = await User.findById(user._id).select("rewardPoints");
+          if (updatedUser) {
+            user.rewardPoints = updatedUser.rewardPoints;
+          }
+        }
+      } catch (rewardErr) {
+        console.error("[Referral Reward Processing Error]:", rewardErr);
+        // Do not fail user registration if reward processing encounters a non-fatal error;
+        // attribution is saved and can be reconciled.
+      }
+    }
 
     // Generate JWT access token for instant auto-login
     const token = generateAccessToken(user);
@@ -63,6 +109,8 @@ export const register = async (req, res, next) => {
       dateOfBirth: user.dateOfBirth,
       gender: user.gender,
       role: user.role,
+      referralCode: user.referralCode,
+      rewardPoints: user.rewardPoints || 0,
       isEmailVerified: user.isEmailVerified,
     };
 
@@ -120,6 +168,19 @@ export const verifyEmail = async (req, res, next) => {
     user.lastVerificationEmailSentAt = undefined;
 
     await user.save({ validateBeforeSave: false });
+
+    // Process any pending referral reward now that email is verified
+    try {
+      const pendingReferral = await Referral.findOne({
+        referred: user._id,
+        status: "PENDING",
+      });
+      if (pendingReferral) {
+        await processReferralReward({ referralId: pendingReferral._id });
+      }
+    } catch (refErr) {
+      console.error("[Email Verification Referral Process Error]:", refErr);
+    }
 
     res.status(200).json({
       success: true,
