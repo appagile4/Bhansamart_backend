@@ -21,9 +21,13 @@ export const getAttributes = async (req, res) => {
     const query = { status: "ACTIVE" };
 
     if (category && category !== "all" && category !== "All" && category !== "All Categories") {
-      const cleanCat = String(category).trim();
+      let cleanCat = String(category).trim();
+      try {
+        cleanCat = decodeURIComponent(cleanCat).trim();
+      } catch {}
+      const escapedCat = cleanCat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       query.$or = [
-        { categories: { $regex: cleanCat, $options: "i" } },
+        { categories: { $regex: escapedCat, $options: "i" } },
         { categories: { $size: 0 } },
         { categories: { $exists: false } },
       ];
