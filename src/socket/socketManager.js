@@ -339,7 +339,7 @@ export const initSocket = (httpServer) => {
               lastLocationUpdatedAt: now,
             },
           },
-          { new: true }
+          { returnDocument: "after" }
         );
 
         // 2. If partner is actively fulfilling an order, sync coordinates and broadcast
@@ -583,6 +583,8 @@ export const emitOrderStatusUpdate = (orderId, customerId, order) => {
     _id: order._id,
     orderNumber: order.orderNumber,
     orderStatus: order.orderStatus,
+    refundStatus: order.refundStatus,
+    refundDetails: order.refundDetails,
     rejectionReason: order.rejectionReason,
     statusHistory: order.statusHistory,
     totalAmount: order.totalAmount,
@@ -614,11 +616,14 @@ export const emitOrderStatusUpdate = (orderId, customerId, order) => {
 /**
  * Real-time notification helper: Emit event to a specific delivery partner room
  */
-export const emitToDeliveryPartner = (deliveryBoyId, event, data) => {
+export const emitToDeliveryPartner = (deliveryBoyId, event, data, userId = null) => {
   if (!io || !deliveryBoyId) return;
   const room = `delivery:${deliveryBoyId}`;
   io.to(room).emit(event, data);
-  console.log(`[Socket Emitted] ${event} sent to ${room}`);
+  if (userId) {
+    io.to(`user:${userId}`).emit(event, data);
+  }
+  console.log(`[Socket Emitted] ${event} sent to ${room} (and user:${userId || "none"})`);
 };
 
 /**

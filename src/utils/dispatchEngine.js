@@ -49,55 +49,61 @@ export const calculateDistanceKm = (lat1, lon1, lat2, lon2) => {
 
 /**
  * Find eligible and available delivery partners near store location
+ * Priority: Nearest available partner to the vendor's house / warehouse coordinates
  */
 export const findEligiblePartners = async ({
   longitude,
   latitude,
-  maxDistanceMeters = 10000, // 10 km
+  maxDistanceMeters = 25000, // 25 km primary radius
   excludePartnerIds = [],
 }) => {
-  const freshThreshold = new Date(Date.now() - 30 * 60 * 1000); // Updated within 30 min
+  const storeLng = Number(longitude);
+  const storeLat = Number(latitude);
 
-  const query = {
+  const baseFilter = {
     _id: { $nin: excludePartnerIds },
     approvalStatus: "APPROVED",
     "securityDeposit.status": "PAID",
     availability: "ONLINE",
     activeOrderId: null,
-    "documents.panCard.status": "VERIFIED",
-    "documents.aadhaarCard.status": "VERIFIED",
-    "documents.drivingLicense.status": "VERIFIED",
-    "documents.vehicleRc.status": "VERIFIED",
-    lastLocationUpdatedAt: { $gte: freshThreshold },
-    currentLocation: {
-      $near: {
-        $geometry: {
-          type: "Point",
-          coordinates: [longitude, latitude],
-        },
-        $maxDistance: maxDistanceMeters,
-      },
-    },
   };
 
+  let partners = [];
+
+  // 1. Primary Query: MongoDB 2dsphere $near query (automatically returns candidates sorted nearest-to-furthest)
   try {
-    return await DeliveryBoy.find(query).limit(5);
+    partners = await DeliveryBoy.find({
+      ...baseFilter,
+      currentLocation: {
+        $near: {
+          $geometry: {
+            type: "Point",
+            coordinates: [storeLng, storeLat],
+          },
+          $maxDistance: maxDistanceMeters,
+        },
+      },
+    }).limit(10);
   } catch (err) {
-    // Fallback if 2dsphere index query fails or testing without geospatial index
-    console.warn("[findEligiblePartners] Geospatial query warning, using in-memory distance fallback:", err.message);
-    const candidateQuery = {
-      _id: { $nin: excludePartnerIds },
-      approvalStatus: "APPROVED",
-      "securityDeposit.status": "PAID",
-      availability: "ONLINE",
-      activeOrderId: null,
-      "documents.panCard.status": "VERIFIED",
-      "documents.aadhaarCard.status": "VERIFIED",
-      "documents.drivingLicense.status": "VERIFIED",
-      "documents.vehicleRc.status": "VERIFIED",
-    };
-    return await DeliveryBoy.find(candidateQuery).limit(5);
+    console.warn("[findEligiblePartners] $near query warning, falling back to Haversine sort:", err.message);
   }
+
+  // 2. Fallback / Extended Query: If no partners in primary radius, find all active online partners
+  // and sort them strictly by exact Haversine distance from the vendor's location
+  if (!partners || partners.length === 0) {
+    const candidates = await DeliveryBoy.find(baseFilter).limit(50);
+    partners = candidates
+      .map((p) => {
+        const pLng = Number(p.currentLocation?.coordinates?.[0]) || storeLng;
+        const pLat = Number(p.currentLocation?.coordinates?.[1]) || storeLat;
+        const distKm = calculateDistanceKm(pLat, pLng, storeLat, storeLng);
+        return { partner: p, distanceKm: distKm };
+      })
+      .sort((a, b) => a.distanceKm - b.distanceKm)
+      .map((item) => item.partner);
+  }
+
+  return partners;
 };
 
 /**
@@ -121,16 +127,23 @@ export const dispatchOrderToNearestPartner = async (orderId) => {
       return { success: false, message: `Order status is ${order.orderStatus}` };
     }
 
-    // Determine vendor store coordinates
+    // Determine vendor store/warehouse coordinates
     const vendor = order.vendor;
-    const storeLng =
-      vendor?.shippingLocations?.longitude && !isNaN(vendor.shippingLocations.longitude)
-        ? Number(vendor.shippingLocations.longitude)
-        : 85.3240;
-    const storeLat =
-      vendor?.shippingLocations?.latitude && !isNaN(vendor.shippingLocations.latitude)
-        ? Number(vendor.shippingLocations.latitude)
-        : 27.7172;
+    let storeLng = 85.3240;
+    let storeLat = 27.7172;
+
+    if (Array.isArray(vendor?.location?.coordinates) && vendor.location.coordinates.length >= 2) {
+      storeLng = Number(vendor.location.coordinates[0]);
+      storeLat = Number(vendor.location.coordinates[1]);
+    } else if (
+      vendor?.shippingLocations?.longitude &&
+      vendor?.shippingLocations?.latitude &&
+      !isNaN(vendor.shippingLocations.longitude) &&
+      !isNaN(vendor.shippingLocations.latitude)
+    ) {
+      storeLng = Number(vendor.shippingLocations.longitude);
+      storeLat = Number(vendor.shippingLocations.latitude);
+    }
 
     // Find previous rejections or timeouts for this order to avoid offering repeatedly
     const existingAssignments = await DeliveryAssignment.find({
@@ -155,7 +168,7 @@ export const dispatchOrderToNearestPartner = async (orderId) => {
     const eligiblePartners = await findEligiblePartners({
       longitude: storeLng,
       latitude: storeLat,
-      maxDistanceMeters: 10000,
+      maxDistanceMeters: 25000,
       excludePartnerIds: excludeIds,
     });
 
@@ -167,6 +180,7 @@ export const dispatchOrderToNearestPartner = async (orderId) => {
       };
     }
 
+    // Nearest partner to the vendor house is index 0
     const candidate = eligiblePartners[0];
 
     // Calculate distance and estimated earnings
@@ -251,10 +265,15 @@ export const dispatchOrderToNearestPartner = async (orderId) => {
       timeoutSeconds,
     };
 
-    // Emit real-time offer to candidate's socket rooms
-    emitToDeliveryPartner(candidate._id.toString(), "delivery:order:request", offerPayload);
+    // Emit real-time offer to candidate's socket rooms (delivery room and user room)
+    emitToDeliveryPartner(
+      candidate._id.toString(),
+      "delivery:order:request",
+      offerPayload,
+      candidate.user?.toString()
+    );
     console.log(
-      `[Dispatch] Offered Order ${order.orderNumber} to Delivery Partner ${candidate.fullName} (${candidate._id}). Timeout in ${timeoutSeconds}s.`
+      `[Dispatch] Offered Order ${order.orderNumber} to Nearest Delivery Partner ${candidate.fullName} (${candidate._id}, ${distanceToStore} km away). Timeout in ${timeoutSeconds}s.`
     );
 
     // Schedule automated offer expiry check

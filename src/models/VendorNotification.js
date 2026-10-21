@@ -22,6 +22,8 @@ const vendorNotificationSchema = new mongoose.Schema(
         "COD_COLLECTED",
         "COD_SUBMITTED",
         "WITHDRAWAL_UPDATE",
+        "REFUND_PROCESSED",
+        "REFUND_REQUESTED",
         "SYSTEM",
       ],
       required: true,

@@ -14,6 +14,12 @@ const vendorTransactionSchema = new mongoose.Schema(
       index: true,
       default: null,
     },
+    refund: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Refund",
+      index: true,
+      default: null,
+    },
     deliveryBoy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "DeliveryBoy",
@@ -29,6 +35,10 @@ const vendorTransactionSchema = new mongoose.Schema(
         "WITHDRAWAL",
         "PLATFORM_FEE",
         "DIRECT_QR_PAYMENT",
+        "REFUND_DEDUCTION",
+        "COMMISSION_REVERSAL",
+        "COMMISSION_DEDUCTION",
+        "RECOVERY_ADJUSTMENT",
       ],
       required: true,
       index: true,
@@ -42,6 +52,14 @@ const vendorTransactionSchema = new mongoose.Schema(
       default: 0,
     },
     commission: {
+      type: Number,
+      default: 0,
+    },
+    commissionRate: {
+      type: Number,
+      default: 0.015,
+    },
+    commissionBase: {
       type: Number,
       default: 0,
     },
@@ -63,6 +81,8 @@ const vendorTransactionSchema = new mongoose.Schema(
         "COMPLETED",
         "FAILED",
         "DIRECT_SETTLED",
+        "REVERSED",
+        "RECOVERED",
       ],
       default: "SETTLED",
       index: true,

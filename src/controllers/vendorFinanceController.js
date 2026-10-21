@@ -11,6 +11,7 @@ import {
   emitVendorWalletUpdate,
 } from "../socket/socketManager.js";
 import { uploadToCloudinary, deleteFromCloudinary } from "../utils/cloudinaryUpload.js";
+import { recordCodCashSubmission } from "../services/financeLedgerService.js";
 
 /**
  * Helper to resolve authenticated vendor profile
@@ -105,6 +106,8 @@ export const getDashboardStats = async (req, res, next) => {
           availableWithdrawalBalance: wallet.currentBalance || 0,
           pendingSettlement: wallet.pendingSettlement || 0,
           codCashWithDeliveryBoys: wallet.codCashWithDeliveryBoys || 0,
+          pendingRecoveries: wallet.pendingRecoveries || 0,
+          platformCommissionRate: 0.015,
           storeRating: 4.9,
         },
         recentOrders,
@@ -522,98 +525,20 @@ export const confirmCodHandover = async (req, res, next) => {
     // Generate unique handover receipt number
     const receiptNumber = await CodHandover.generateReceiptNumber();
 
-    // Mark orders as submitted up to the submitted amount
-    let remainingToAllocate = submitted;
-    const settledOrderIds = [];
-
-    for (const ord of eligibleOrders) {
-      const ordAmt = ord.codDetails?.cashCollectedAmount || ord.totalAmount || 0;
-      if (remainingToAllocate >= ordAmt) {
-        ord.codDetails.cashSubmittedToVendor = true;
-        ord.codDetails.cashSubmittedAt = new Date();
-        ord.codDetails.handoverReceipt = receiptNumber;
-        await ord.save();
-        settledOrderIds.push(ord._id);
-        remainingToAllocate -= ordAmt;
-      } else if (remainingToAllocate > 0) {
-        // Partial settlement on this order
-        ord.codDetails.cashSubmittedToVendor = true;
-        ord.codDetails.cashSubmittedAt = new Date();
-        ord.codDetails.handoverReceipt = receiptNumber;
-        await ord.save();
-        settledOrderIds.push(ord._id);
-        remainingToAllocate = 0;
-      }
-    }
-
-    // Update delivery partner cash custody
-    deliveryBoy.codCashInCustody = Math.max(0, (deliveryBoy.codCashInCustody || 0) - submitted);
-    await deliveryBoy.save();
-
-    // Update vendor wallet: Decrement custody with delivery boys
-    vendor.wallet.codCashWithDeliveryBoys = Math.max(
-      0,
-      (vendor.wallet.codCashWithDeliveryBoys || 0) - submitted
-    );
-    await vendor.save();
-
-    // Record CodHandover receipt
-    const handover = await CodHandover.create({
-      receiptNumber,
-      vendor: vendor._id,
-      deliveryBoy: deliveryBoy._id,
-      orders: settledOrderIds,
-      amountDue: totalDue,
+    // Delegate custody clearing, 1.5% platform commission deduction, and ledger updates
+    const handoverResult = await recordCodCashSubmission(vendor, deliveryBoy, {
       amountSubmitted: submitted,
-      remainingBalance: Math.max(0, totalDue - submitted),
-      vendorConfirmed: true,
-      paymentMode,
-      notes: notes || `Cash verified and received at store counter by ${vendor.businessDetails?.businessName || "Vendor"}`,
-    });
-
-    // Record Vendor Transaction
-    await VendorTransaction.create({
-      vendor: vendor._id,
-      deliveryBoy: deliveryBoy._id,
-      type: "COD_HANDOVER",
-      amount: submitted,
-      grossAmount: submitted,
-      netAmount: submitted,
-      paymentMethod: paymentMode,
-      status: "COMPLETED",
-      idempotencyKey: `COD-HANDOVER-${receiptNumber}`,
-      notes: `Receipt #${receiptNumber} - Cash submitted by ${deliveryBoy.fullName}`,
-    });
-
-    // Create Notification
-    const notification = await VendorNotification.create({
-      vendor: vendor._id,
-      type: "COD_SUBMITTED",
-      title: "COD Cash Received",
-      message: `Received NPR ${submitted.toLocaleString()} from ${deliveryBoy.fullName}. Receipt #${receiptNumber}.`,
-      data: {
-        receiptNumber,
-        deliveryBoyId: deliveryBoy._id,
-        amountSubmitted: submitted,
-      },
-    });
-
-    // Real-time Socket broadcasts
-    emitVendorNotification(vendor._id.toString(), notification);
-    emitVendorCodUpdate(vendor._id.toString(), {
-      submitted,
+      totalDue,
+      eligibleOrders,
       receiptNumber,
-      remainingCodWithRiders: vendor.wallet.codCashWithDeliveryBoys,
+      paymentMode,
+      notes,
     });
 
     res.status(200).json({
       success: true,
-      message: `COD cash of NPR ${submitted.toLocaleString()} received and confirmed successfully.`,
-      data: {
-        handover,
-        remainingCustodyWithRider: deliveryBoy.codCashInCustody,
-        vendorCodPending: vendor.wallet.codCashWithDeliveryBoys,
-      },
+      message: `COD cash of NPR ${submitted.toLocaleString()} received and confirmed successfully. Platform commission: NPR ${handoverResult.totalCommissionDue}.`,
+      data: handoverResult,
     });
   } catch (error) {
     next(error);

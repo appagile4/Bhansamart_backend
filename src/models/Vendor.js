@@ -90,6 +90,7 @@ const vendorSchema = new mongoose.Schema(
       totalEarned: { type: Number, default: 0, min: 0 },
       pendingSettlement: { type: Number, default: 0, min: 0 },
       codCashWithDeliveryBoys: { type: Number, default: 0, min: 0 }, // Cash in delivery boys custody
+      pendingRecoveries: { type: Number, default: 0, min: 0 }, // Tracked recoveries due from vendor refunds/adjustments
     },
 
     // Vendor Configured Payment QR Code & UPI Details

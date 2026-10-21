@@ -8,6 +8,10 @@ import VendorNotification from "../models/VendorNotification.js";
 import DeliveryEarningsLedger from "../models/DeliveryEarningsLedger.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
+  recordCodDoorstepCollection,
+  recordOnlineOrderPayment,
+} from "../services/financeLedgerService.js";
+import {
   verifyHashedOTP,
   dispatchOrderToNearestPartner,
 } from "../utils/dispatchEngine.js";
@@ -123,7 +127,7 @@ export const acceptAssignment = async (req, res, next) => {
           acceptedAt: new Date(),
         },
       },
-      { new: true }
+      { returnDocument: "after" }
     );
 
     if (!assignment) {
@@ -154,7 +158,7 @@ export const acceptAssignment = async (req, res, next) => {
           },
         },
       },
-      { new: true }
+      { returnDocument: "after" }
     ).populate("vendor customer");
 
     if (!order) {
@@ -221,7 +225,7 @@ export const rejectAssignment = async (req, res, next) => {
           rejectionReason: reason,
         },
       },
-      { new: true }
+      { returnDocument: "after" }
     );
 
     if (!assignment) {
@@ -517,176 +521,24 @@ export const verifyDeliveryOtp = async (req, res, next) => {
     // ── Handle Vendor Accounting, COD Custody & Wallet Settlement ──
     const vendor = await Vendor.findById(order.vendor?._id || order.vendor);
     if (vendor) {
-      if (!vendor.wallet) {
-        vendor.wallet = {
-          currentBalance: 0,
-          totalEarned: 0,
-          pendingSettlement: 0,
-          codCashWithDeliveryBoys: 0,
-        };
-      }
-
-      // Check if rider completed payment via Direct Store QR / UPI at customer doorstep
       if (
         order.paymentMethod === "Cash on delivery" &&
         (paymentMode === "DIRECT_QR" || paymentMode === "ONLINE")
       ) {
-        order.paymentStatus = "paid";
-        order.paymentMethod = "Vendor QR Code (Direct)";
-        order.codDetails = {
-          cashCollectedByRider: false,
-          cashCollectedAmount: 0,
-          cashCollectedAt: null,
-          cashSubmittedToVendor: false,
-          handoverReceipt: "DIRECT_QR_PAID",
-          isDirectVendorQrPaid: true,
-          directQrPaidAt: now,
-        };
-
-        // Note: No physical cash collected, so physical custody is NOT incremented:
-        // deliveryBoy.codCashInCustody is untouched
-        // vendor.wallet.codCashWithDeliveryBoys is untouched
-        // vendor.wallet.currentBalance is NOT credited because the store received money directly into their bank/UPI
-
-        // Record Vendor Transaction with Idempotency Key
-        const directQrTxnKey = `TXN-DIRECT-QR-${order._id}`;
-        const existingTxn = await VendorTransaction.findOne({ idempotencyKey: directQrTxnKey });
-        if (!existingTxn) {
-          await VendorTransaction.create({
-            vendor: vendor._id,
-            order: order._id,
-            deliveryBoy: deliveryBoy._id,
-            type: "DIRECT_QR_PAYMENT",
-            amount: order.totalAmount,
-            grossAmount: order.totalAmount,
-            netAmount: order.totalAmount,
-            paymentMethod: "Vendor QR Code (Direct)",
-            status: "DIRECT_SETTLED",
-            idempotencyKey: directQrTxnKey,
-            notes: `Direct UPI/QR payment received by store account at customer doorstep for Order #${order.orderNumber} via ${deliveryBoy.fullName}. Not added to wallet balance as store already received funds directly.`,
-          });
-        }
-
-        // Persistent Vendor Notification
-        const vendorNotif = await VendorNotification.create({
-          vendor: vendor._id,
-          order: order._id,
-          type: "PAYMENT_RECEIVED",
-          title: "Direct QR Payment Received",
-          message: `Customer paid NPR ${order.totalAmount} directly to your Store QR/UPI for Order #${order.orderNumber} via delivery partner ${deliveryBoy.fullName}.`,
-          data: {
-            orderNumber: order.orderNumber,
-            totalAmount: order.totalAmount,
-            deliveryBoyName: deliveryBoy.fullName,
-            paymentMethod: "Vendor QR Code (Direct)",
-          },
+        await recordCodDoorstepCollection(order, deliveryBoy, {
+          paymentMode: "DIRECT_QR",
+          now,
         });
-
-        emitVendorNotification(vendor._id.toString(), vendorNotif);
       } else if (order.paymentMethod === "Cash on delivery") {
-        order.paymentStatus = "paid";
-        order.codDetails = {
-          cashCollectedByRider: true,
-          cashCollectedAmount: order.totalAmount,
-          cashCollectedAt: now,
-          cashSubmittedToVendor: false,
-          handoverReceipt: "",
-          isDirectVendorQrPaid: false,
-          directQrPaidAt: null,
-        };
-
-        // Increment Delivery Boy's physical cash custody
-        deliveryBoy.codCashInCustody = (deliveryBoy.codCashInCustody || 0) + order.totalAmount;
-
-        // Increment Vendor's COD custody tracker (STRICTLY NOT credited to withdrawable balance)
-        vendor.wallet.codCashWithDeliveryBoys =
-          (vendor.wallet.codCashWithDeliveryBoys || 0) + order.totalAmount;
-        await vendor.save();
-
-        // Record Vendor Transaction with Idempotency Key
-        const codTxnKey = `TXN-COD-COLL-${order._id}`;
-        const existingTxn = await VendorTransaction.findOne({ idempotencyKey: codTxnKey });
-        if (!existingTxn) {
-          await VendorTransaction.create({
-            vendor: vendor._id,
-            order: order._id,
-            deliveryBoy: deliveryBoy._id,
-            type: "COD_COLLECTION",
-            amount: order.totalAmount,
-            grossAmount: order.totalAmount,
-            netAmount: order.totalAmount,
-            paymentMethod: "Cash on delivery",
-            status: "CASH_IN_CUSTODY",
-            idempotencyKey: codTxnKey,
-            notes: `Cash collected by ${deliveryBoy.fullName} for Order #${order.orderNumber}. Handover pending at store counter.`,
-          });
-        }
-
-        // Persistent Vendor Notification
-        const vendorNotif = await VendorNotification.create({
-          vendor: vendor._id,
-          order: order._id,
-          type: "COD_COLLECTED",
-          title: "COD Cash Collected",
-          message: `Delivery partner ${deliveryBoy.fullName} collected NPR ${order.totalAmount} for order #${order.orderNumber}. Cash handover pending at your store.`,
-          data: {
-            orderNumber: order.orderNumber,
-            totalAmount: order.totalAmount,
-            deliveryBoyName: deliveryBoy.fullName,
-          },
-        });
-
-        emitVendorNotification(vendor._id.toString(), vendorNotif);
-        emitVendorCodUpdate(vendor._id.toString(), {
-          orderId: order._id,
-          orderNumber: order.orderNumber,
-          collectedAmount: order.totalAmount,
-          codCashWithDeliveryBoys: vendor.wallet.codCashWithDeliveryBoys,
+        await recordCodDoorstepCollection(order, deliveryBoy, {
+          paymentMode: "CASH",
+          now,
         });
       } else {
-        // Online Payment Settlement
-        order.paymentStatus = "paid";
-        const grossAmount = order.totalAmount;
-        const commission = 0; // 0% promotional platform commission
-        const netAmount = grossAmount - commission;
-
-        const onlineTxnKey = `TXN-ORD-${order._id}`;
-        const existingTxn = await VendorTransaction.findOne({ idempotencyKey: onlineTxnKey });
-        if (!existingTxn) {
-          await VendorTransaction.create({
-            vendor: vendor._id,
-            order: order._id,
-            type: "ORDER_EARNING",
-            amount: netAmount,
-            grossAmount,
-            commission,
-            netAmount,
-            paymentMethod: order.paymentMethod,
-            status: "SETTLED",
-            idempotencyKey: onlineTxnKey,
-            notes: `Online order payout for Order #${order.orderNumber}`,
-          });
-
-          // Add to vendor withdrawable wallet
-          vendor.wallet.currentBalance += netAmount;
-          vendor.wallet.totalEarned += netAmount;
-          await vendor.save();
-        }
-
-        const vendorNotif = await VendorNotification.create({
-          vendor: vendor._id,
-          order: order._id,
-          type: "ORDER_DELIVERED",
-          title: "Order Delivered & Settled",
-          message: `Order #${order.orderNumber} delivered. NPR ${netAmount} credited to your withdrawable balance.`,
-          data: {
-            orderNumber: order.orderNumber,
-            netAmount,
-          },
+        // Online Payment Settlement (Gateway Verified Ledger)
+        await recordOnlineOrderPayment(order, {
+          paymentProvider: order.paymentMethod || "ONLINE_GATEWAY",
         });
-
-        emitVendorNotification(vendor._id.toString(), vendorNotif);
-        emitVendorWalletUpdate(vendor._id.toString(), vendor.wallet);
       }
     }
 

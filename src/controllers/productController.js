@@ -715,7 +715,7 @@ export const updateProduct = async (req, res, next) => {
     }
 
     const updatedProduct = await Product.findByIdAndUpdate(id, updates, {
-      new: true,
+      returnDocument: "after",
       runValidators: true,
     });
 

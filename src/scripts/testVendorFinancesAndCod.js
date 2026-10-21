@@ -36,7 +36,7 @@ async function runTests() {
         role: "vendor",
         isActive: true,
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
 
     vendor = await Vendor.findOneAndUpdate(
@@ -65,7 +65,7 @@ async function runTests() {
           acceptQrPayments: true,
         },
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
     console.log("✓ Vendor profile setup with initial wallet balance: NPR 5,000");
 
@@ -79,7 +79,7 @@ async function runTests() {
         role: "delivery_boy",
         isActive: true,
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
 
     deliveryBoy = await DeliveryBoy.findOneAndUpdate(
@@ -92,7 +92,7 @@ async function runTests() {
         availability: "ONLINE",
         codCashInCustody: 0,
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
     console.log("✓ Delivery Partner setup with initial COD custody: NPR 0");
 

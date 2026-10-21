@@ -5,6 +5,7 @@ import Cart from "../models/Cart.js";
 import Address from "../models/Address.js";
 import DeliveryAssignment from "../models/DeliveryAssignment.js";
 import VendorNotification from "../models/VendorNotification.js";
+import Refund from "../models/Refund.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
   emitNewOrderToVendor,
@@ -311,6 +312,34 @@ export const getMyOrders = async (req, res, next) => {
       Order.countDocuments({ customer: customerId }),
     ]);
 
+    // Attach latest refund / replacement claim details for orders with active claims
+    const claimOrderIds = orders
+      .filter(
+        (o) =>
+          o.refundStatus &&
+          o.refundStatus !== "NONE" &&
+          o.refundStatus !== "NOT_APPLICABLE"
+      )
+      .map((o) => o._id);
+
+    if (claimOrderIds.length > 0) {
+      const refunds = await Refund.find({ order: { $in: claimOrderIds } })
+        .sort({ createdAt: -1 })
+        .lean();
+      const refundMap = new Map();
+      for (const r of refunds) {
+        const oId = r.order.toString();
+        if (!refundMap.has(oId)) {
+          refundMap.set(oId, r);
+        }
+      }
+      for (const ord of orders) {
+        if (refundMap.has(ord._id.toString())) {
+          ord.refundDetails = refundMap.get(ord._id.toString());
+        }
+      }
+    }
+
     return res.status(200).json({
       success: true,
       count: orders.length,
@@ -376,6 +405,21 @@ export const getOrderById = async (req, res, next) => {
       orderData.customerDeliveryOtp = order.deliveryOtp?.displayCode || null;
     } else {
       delete orderData.deliveryOtp;
+    }
+
+    // Attach latest refund / replacement details if this order has an active or past claim
+    if (
+      order.refundStatus &&
+      order.refundStatus !== "NONE" &&
+      order.refundStatus !== "NOT_APPLICABLE"
+    ) {
+      const latestRefund = await Refund.findOne({ order: order._id })
+        .sort({ createdAt: -1 })
+        .populate("replacementOrder", "orderNumber orderStatus totalAmount")
+        .lean();
+      if (latestRefund) {
+        orderData.refundDetails = latestRefund;
+      }
     }
 
     return res.status(200).json({
@@ -635,6 +679,87 @@ export const updateOrderStatus = async (req, res, next) => {
       success: true,
       message: `Order status updated to ${status}.`,
       data: updatedOrder,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Customer cancels order before delivery/dispatch
+ * @route   POST /api/orders/:id/cancel
+ * @access  Private (Customer)
+ */
+export const cancelCustomerOrder = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason = "Order cancelled by customer" } = req.body;
+    const customerId = req.user._id;
+
+    const order = await Order.findOne({ _id: id, customer: customerId });
+    if (!order) {
+      return next(new AppError("Order not found or not authorized", 404));
+    }
+
+    if (["DELIVERED", "OUT_FOR_DELIVERY", "CANCELLED", "REJECTED"].includes(order.orderStatus)) {
+      return next(
+        new AppError(
+          `Cannot cancel order with status ${order.orderStatus}. Please submit a return/refund request if already delivered.`,
+          400
+        )
+      );
+    }
+
+    order.orderStatus = "CANCELLED";
+    order.cancellationReason = reason;
+    order.statusHistory.push({
+      status: "CANCELLED",
+      timestamp: new Date(),
+      updatedBy: customerId,
+      reason,
+    });
+
+    // Restore inventory stock
+    for (const item of order.items) {
+      if (item.product) {
+        await Product.findByIdAndUpdate(item.product, {
+          $inc: { stock: item.quantity, ordersCount: -item.quantity },
+        }).catch(() => {});
+      }
+    }
+
+    // If order was paid online, initiate automatic full refund
+    if (order.paymentStatus === "paid") {
+      order.refundStatus = "REFUNDED";
+      await order.save();
+
+      // Process commission reversal & customer refund via finance ledger service
+      const { processOrderRefund } = await import("../services/financeLedgerService.js");
+      await processOrderRefund(order, {
+        claimType: "CANCELLATION",
+        reason,
+        requesterId: customerId,
+        autoApprove: true,
+      });
+    } else {
+      // COD pre-dispatch cancellation: Zero customer charge, no refund needed
+      order.refundStatus = "NOT_APPLICABLE";
+      await order.save();
+    }
+
+    // Real-time broadcast
+    emitOrderStatusUpdate(order._id.toString(), customerId.toString(), order);
+
+    // Cancel any active delivery assignments
+    await DeliveryAssignment.updateMany(
+      { order: order._id, status: { $in: ["OFFERED", "ACCEPTED"] } },
+      { $set: { status: "REJECTED" } }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Order successfully cancelled.",
+      data: order,
     });
   } catch (error) {
     next(error);

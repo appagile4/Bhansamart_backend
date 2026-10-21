@@ -5,6 +5,7 @@ import {
   getOrderById,
   getVendorOrders,
   updateOrderStatus,
+  cancelCustomerOrder,
 } from "../controllers/orderController.js";
 import { protect, authorizeRoles } from "../middleware/authMiddleware.js";
 
@@ -13,6 +14,7 @@ const router = express.Router();
 // ── Customer Order Endpoints ──────────────────────────────────────────
 router.post("/", protect, createOrder);
 router.get("/my-orders", protect, getMyOrders);
+router.post("/:id/cancel", protect, cancelCustomerOrder);
 
 // ── Vendor Order Endpoints ────────────────────────────────────────────
 router.get(
