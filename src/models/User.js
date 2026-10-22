@@ -94,6 +94,24 @@ const userSchema = new mongoose.Schema(
       },
     },
 
+    // Admin & Staff Vendor Scoping (Superadmin assigns vendors to Admin)
+    assignedVendors: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Vendor",
+      },
+    ],
+
+    // Granular Admin Operational Permissions (Financial access remains superadmin-only)
+    adminPermissions: {
+      canManageVendors: { type: Boolean, default: true },
+      canEditProducts: { type: Boolean, default: true },
+      canManageTickets: { type: Boolean, default: true },
+      canViewOrders: { type: Boolean, default: true },
+      canSendNotifications: { type: Boolean, default: true },
+      canViewAnalytics: { type: Boolean, default: true },
+    },
+
     // OTP for Login / Verification
     otp: {
       type: String,

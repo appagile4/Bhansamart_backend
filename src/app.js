@@ -28,6 +28,7 @@ import paymentRoutes from "./routes/paymentRoutes.js";
 import refundRoutes from "./routes/refundRoutes.js";
 import brandRoutes from "./routes/brandRoutes.js";
 import attributeRoutes from "./routes/attributeRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
@@ -141,6 +142,9 @@ app.use("/api/delivery/earnings", deliveryEarningsRoutes);
 
 // Admin Delivery Management Routes
 app.use("/api/admin/delivery", adminDeliveryRoutes);
+
+// Unified Superadmin & Admin Management System Routes
+app.use("/api/admin", adminRoutes);
 
 // Referral & Reward Points Module Routes (v1 & unversioned)
 app.use("/api/v1/referrals", referralRoutes);
