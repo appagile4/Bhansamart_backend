@@ -116,6 +116,49 @@ export const uploadProductImageToCloudinary = (
 };
 
 /**
+ * Upload category / subcategory image to Cloudinary (optimized for category banners & icons)
+ * @param {Buffer|string} fileSource 
+ * @returns {Promise<{url: string, publicId: string}>}
+ */
+export const uploadCategoryImageToCloudinary = (fileSource) => {
+  return new Promise((resolve, reject) => {
+    const folder = "bhansamart/categories";
+    const options = {
+      folder,
+      transformation: [
+        { width: 800, height: 800, crop: "limit" },
+        { quality: "auto" },
+        { fetch_format: "auto" },
+      ],
+    };
+
+    if (typeof fileSource === "string") {
+      cloudinary.uploader.upload(fileSource, options, (error, result) => {
+        if (error) return reject(error);
+        resolve({
+          url: result.secure_url || result.url,
+          publicId: result.public_id,
+        });
+      });
+      return;
+    }
+
+    const uploadStream = cloudinary.uploader.upload_stream(
+      options,
+      (error, result) => {
+        if (error) return reject(error);
+        resolve({
+          url: result.secure_url || result.url,
+          publicId: result.public_id,
+        });
+      }
+    );
+
+    uploadStream.end(fileSource);
+  });
+};
+
+/**
  * Delete an image from Cloudinary using its public URL or public_id
  * @param {string} imageUrl - Cloudinary secure URL or public_id
  */

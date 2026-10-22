@@ -13,7 +13,9 @@ import {
   getCategoriesAdmin,
   createCategoryAdmin,
   updateCategoryAdmin,
+  uploadCategoryImageAdmin,
   getAllProductsAdmin,
+  getProductDetailsAdmin,
   moderateProductAdmin,
   getAllFinancialTransactions,
   getAllWithdrawalsAdmin,
@@ -33,6 +35,7 @@ import {
   enforceAdminVendorScope,
   requireSuperadminOnly,
 } from "../middleware/adminVendorScopeMiddleware.js";
+import { uploadSingleImage } from "../middleware/uploadMiddleware.js";
 
 const router = express.Router();
 
@@ -66,9 +69,11 @@ router.get("/delivery-boys", getAllDeliveryBoysAdmin);
 
 // 6. Catalog (Categories & Products)
 router.get("/categories", getCategoriesAdmin);
+router.post("/categories/upload-image", uploadSingleImage("image"), uploadCategoryImageAdmin);
 router.post("/categories", createCategoryAdmin);
 router.put("/categories/:id", updateCategoryAdmin);
 router.get("/products", getAllProductsAdmin);
+router.get("/products/:id", getProductDetailsAdmin);
 router.patch("/products/:id/moderate", moderateProductAdmin);
 
 // 7. Support Tickets

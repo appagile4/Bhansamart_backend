@@ -16,6 +16,7 @@ import { AppError } from "../middleware/errorMiddleware.js";
 import { FINANCE_CONFIG, calculateCommission } from "../config/financeConfig.js";
 import { logAdminAction } from "../services/auditService.js";
 import { getIO, emitVendorNotification } from "../socket/socketManager.js";
+import { uploadCategoryImageToCloudinary } from "../utils/cloudinaryUpload.js";
 
 // Helper to build date range from timeframe filter
 const getDateRangeFilter = (timeframe, startDate, endDate) => {
@@ -1165,8 +1166,145 @@ export const getAllDeliveryBoysAdmin = async (req, res, next) => {
  * 6. CATALOG (CATEGORIES, SUBCATEGORIES & PRODUCT MODERATION)
  * ─────────────────────────────────────────────────────────────────────────────
  */
+const CUSTOMER_SECTIONS = [
+  {
+    name: "Grocery & Kitchen",
+    slug: "grocery-kitchen",
+    image: "https://images.unsplash.com/photo-1542838132-92c53300491e?w=400&q=80",
+    description: "Daily fresh essentials, staples, dairy & kitchenware",
+    items: [
+      { name: "Vegetables & Fruits", slug: "vegetables-fruits", image: "https://images.unsplash.com/photo-1610832958506-aa56368176cf?w=300&q=80" },
+      { name: "Atta, Rice & Dal", slug: "atta-rice-dal", image: "https://images.unsplash.com/photo-1586201375761-83865001e31c?w=300&q=80" },
+      { name: "Oil, Ghee & Masala", slug: "oil-ghee-masala", image: "https://images.unsplash.com/photo-1474979266404-7eaacbcd87c5?w=300&q=80" },
+      { name: "Dairy, Bread & Eggs", slug: "dairy-bread-eggs", image: "https://images.unsplash.com/photo-1550583724-b2692b85b150?w=300&q=80" },
+      { name: "Bakery & Biscuits", slug: "bakery-biscuits", image: "https://images.unsplash.com/photo-1558961363-fa8fdf82db35?w=300&q=80" },
+      { name: "Dry Fruits & Cereals", slug: "dry-fruits-cereals", image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=300&q=80" },
+      { name: "Chicken, Meat & Fish", slug: "chicken-meat-fish", image: "https://images.unsplash.com/photo-1607623814075-e51df1bdc82f?w=300&q=80" },
+      { name: "Kitchenware & Appliances", slug: "kitchenware-appliances", image: "https://images.unsplash.com/photo-1556911220-e15b29be8c8f?w=300&q=80" },
+    ],
+  },
+  {
+    name: "Snacks & Drinks",
+    slug: "snacks-drinks",
+    image: "https://images.unsplash.com/photo-1566478989037-eec170784d0b?w=400&q=80",
+    description: "Crispy snacks, beverages, chocolates & quick bites",
+    items: [
+      { name: "Chips, Nachos & Popcorn", slug: "chips-nachos-popcorn", image: "https://images.unsplash.com/photo-1566478989037-eec170784d0b?w=300&q=80" },
+      { name: "Namkeen & Roasted Snacks", slug: "namkeen-roasted-snacks", image: "https://images.unsplash.com/photo-1601050690597-df0568f70950?w=300&q=80" },
+      { name: "Biscuits & Cookies", slug: "biscuits-cookies-wafers", image: "https://images.unsplash.com/photo-1558961363-fa8fdf82db35?w=300&q=80" },
+      { name: "Chocolates & Candies", slug: "chocolates-candies-toffees", image: "https://images.unsplash.com/photo-1549007994-cb92caebd54b?w=300&q=80" },
+      { name: "Dry Fruits & Nuts", slug: "dryfruits-nuts-seeds", image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=300&q=80" },
+      { name: "Snack Bars & Healthy Bites", slug: "snackbars-healthy-bites", image: "https://images.unsplash.com/photo-1590080875515-8a3a8dc5735e?w=300&q=80" },
+      { name: "Instant Noodles & Pasta", slug: "instant-noodles-pasta", image: "https://images.unsplash.com/photo-1612927601601-6638404737ce?w=300&q=80" },
+      { name: "Cold Drinks & Ice Cream", slug: "cold-drinks-icecream", image: "https://images.unsplash.com/photo-1613478223719-2ab802602423?w=300&q=80" },
+    ],
+  },
+  {
+    name: "Beauty & Personal Care",
+    slug: "beauty-personal-care",
+    image: "https://images.unsplash.com/photo-1556228720-195a672e8a03?w=400&q=80",
+    description: "Skincare, haircare, bath, wellness & cosmetics",
+    items: [
+      { name: "Bath & Body", slug: "bath-body", image: "https://images.unsplash.com/photo-1556228720-195a672e8a03?w=300&q=80" },
+      { name: "Hair Care", slug: "hair", image: "https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?w=300&q=80" },
+      { name: "Skin & Faces", slug: "skin-faces", image: "https://images.unsplash.com/photo-1556228722-d0b5ed7cd88c?w=300&q=80" },
+      { name: "Beauty & Cosmetics", slug: "beauty-cosmetics", image: "https://images.unsplash.com/photo-1512496015851-a90fb38ba796?w=300&q=80" },
+      { name: "Feminine Hygiene", slug: "feminine-hygiene", image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=300&q=80" },
+      { name: "Fragrances & Deodorants", slug: "fragrances-deodorants", image: "https://images.unsplash.com/photo-1594035910387-fea47794261f?w=300&q=80" },
+      { name: "Health & Pharma", slug: "health-pharma", image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=300&q=80" },
+      { name: "Sexual Wellness", slug: "sexual-wellness", image: "https://images.unsplash.com/photo-1583947215259-38e31be8751f?w=300&q=80" },
+    ],
+  },
+  {
+    name: "Baby",
+    slug: "baby",
+    image: "https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?w=400&q=80",
+    description: "Diapers, baby food, care & accessories",
+    items: [
+      { name: "Baby Food", slug: "baby-food", image: "https://images.unsplash.com/photo-1596461404969-9ae70f2830c1?w=300&q=80" },
+      { name: "Diapers & Pants", slug: "diapers-pants", image: "https://images.unsplash.com/photo-1584820927498-cfe5211fd8bf?w=300&q=80" },
+      { name: "Baby Care", slug: "baby-care", image: "https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?w=300&q=80" },
+      { name: "Baby Bath", slug: "baby-bath", image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=300&q=80" },
+      { name: "Baby Feeding", slug: "baby-feeding", image: "https://images.unsplash.com/photo-1596461404969-9ae70f2830c1?w=300&q=80" },
+      { name: "Baby Clothing", slug: "baby-clothing", image: "https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?w=300&q=80" },
+      { name: "Baby Accessories", slug: "baby-accessories", image: "https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?w=300&q=80" },
+    ],
+  },
+  {
+    name: "School, Office & Stationery",
+    slug: "school-office-stationery",
+    image: "https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?w=400&q=80",
+    description: "Pens, notebooks, desk supplies, art & crafts",
+    items: [
+      { name: "Pens & Pencils", slug: "pens-pencils", image: "https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?w=300&q=80" },
+      { name: "Notebooks & Diaries", slug: "notebooks-diaries", image: "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=300&q=80" },
+      { name: "Markers & Highlighters", slug: "markers-highlighters", image: "https://images.unsplash.com/photo-1585336261026-7fcfbdfa95b8?w=300&q=80" },
+      { name: "Geometry & Scales", slug: "geometry-scales", image: "https://images.unsplash.com/photo-1503676260728-1c00da094a0b?w=300&q=80" },
+      { name: "Art & Craft Supplies", slug: "art-craft-supplies", image: "https://images.unsplash.com/photo-1513364776144-60967b0f800f?w=300&q=80" },
+      { name: "Files & Folders", slug: "files-folders", image: "https://images.unsplash.com/photo-1587829741301-dc798b83add3?w=300&q=80" },
+      { name: "Office & Desk Supplies", slug: "office-desk-supplies", image: "https://images.unsplash.com/photo-1507842229451-79b1be886a20?w=300&q=80" },
+      { name: "Printer Paper & Labels", slug: "printer-paper-labels", image: "https://images.unsplash.com/photo-1586075010923-2dd4570fb338?w=300&q=80" },
+    ],
+  },
+  {
+    name: "Gifting",
+    slug: "gifting",
+    image: "https://images.unsplash.com/photo-1513885535751-8b9238bd345a?w=400&q=80",
+    description: "Sweets, apparel, gadgets, hampers & toys",
+    items: [
+      { name: "Chocolates & Sweets", slug: "chocolates-sweets", image: "https://images.unsplash.com/photo-1549007994-cb92caebd54b?w=300&q=80" },
+      { name: "Men's Wear", slug: "mens-wear", image: "https://images.unsplash.com/photo-1581655353564-df123a1eb820?w=300&q=80" },
+      { name: "Women's Wear", slug: "womens-wear", image: "https://images.unsplash.com/photo-1601924994987-69e26d50dc26?w=300&q=80" },
+      { name: "Dresses & Ethnic", slug: "dresses-ethnic", image: "https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=300&q=80" },
+      { name: "Cosmetics & Hampers", slug: "cosmetics-hampers", image: "https://images.unsplash.com/photo-1512496015851-a90fb38ba796?w=300&q=80" },
+      { name: "Electronics & Gadgets", slug: "electronics-gadgets", image: "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=300&q=80" },
+      { name: "Toys & Games", slug: "toys-games", image: "https://images.unsplash.com/photo-1594787318286-3d835c1d207f?w=300&q=80" },
+      { name: "Kids & Baby Gifts", slug: "kids-baby-gifts", image: "https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?w=300&q=80" },
+    ],
+  },
+];
+
+const ensureCustomerCategoriesBootstrapped = async () => {
+  for (let i = 0; i < CUSTOMER_SECTIONS.length; i++) {
+    const sec = CUSTOMER_SECTIONS[i];
+    let root = await Category.findOne({ slug: sec.slug });
+    if (!root) {
+      root = await Category.create({
+        name: sec.name,
+        slug: sec.slug,
+        description: sec.description,
+        image: sec.image,
+        level: 0,
+        displayOrder: i + 1,
+        isActive: true,
+      });
+    }
+
+    for (let j = 0; j < sec.items.length; j++) {
+      const it = sec.items[j];
+      const existingSub = await Category.findOne({ slug: it.slug, parentCategory: root._id });
+      if (!existingSub) {
+        await Category.create({
+          name: it.name,
+          slug: it.slug,
+          image: it.image,
+          parentCategory: root._id,
+          level: 1,
+          displayOrder: j + 1,
+          isActive: true,
+        });
+      }
+    }
+  }
+};
+
 export const getCategoriesAdmin = async (req, res, next) => {
   try {
+    const rootCount = await Category.countDocuments({ level: 0 });
+    if (rootCount < CUSTOMER_SECTIONS.length) {
+      await ensureCustomerCategoriesBootstrapped().catch(() => {});
+    }
+
     const categories = await Category.find()
       .populate("parentCategory", "name slug")
       .sort({ displayOrder: 1, createdAt: -1 })
@@ -1191,10 +1329,16 @@ export const getCategoriesAdmin = async (req, res, next) => {
 
 export const createCategoryAdmin = async (req, res, next) => {
   try {
-    const { name, slug, description, image, parentCategory, displayOrder } = req.body;
+    const { name, slug, description, image, parentCategory, displayOrder, isActive } = req.body;
 
-    if (!name) {
+    if (!name || !name.trim()) {
       return next(new AppError("Category name is required", 400));
+    }
+    if (!description || !description.trim()) {
+      return next(new AppError("Category description is required", 400));
+    }
+    if (!image || !image.trim()) {
+      return next(new AppError("Category image URL is required", 400));
     }
 
     const genSlug = slug
@@ -1203,15 +1347,26 @@ export const createCategoryAdmin = async (req, res, next) => {
 
     const level = parentCategory ? 1 : 0;
 
+    let parentId = null;
+    if (parentCategory) {
+      if (mongoose.Types.ObjectId.isValid(parentCategory)) {
+        parentId = parentCategory;
+      } else {
+        const cleanParent = parentCategory.replace(/^cust-root-/, "");
+        const parentDoc = await Category.findOne({ $or: [{ slug: cleanParent }, { name: cleanParent }] });
+        if (parentDoc) parentId = parentDoc._id;
+      }
+    }
+
     const category = await Category.create({
       name: name.trim(),
       slug: genSlug,
-      description: description || "",
-      image: image || "",
-      parentCategory: parentCategory || null,
+      description: description.trim(),
+      image: image.trim(),
+      parentCategory: parentId,
       level,
       displayOrder: parseInt(displayOrder, 10) || 0,
-      isActive: true,
+      isActive: isActive !== false,
     });
 
     await logAdminAction({
@@ -1235,17 +1390,58 @@ export const createCategoryAdmin = async (req, res, next) => {
 export const updateCategoryAdmin = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, description, image, isActive, displayOrder } = req.body;
+    const { name, slug, description, image, isActive, displayOrder } = req.body;
 
-    const category = await Category.findById(id);
+    let category = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      category = await Category.findById(id);
+    }
     if (!category) {
-      return next(new AppError("Category not found", 404));
+      const cleanSlug = id.replace(/^cust-root-|^cust-sub-/, "");
+      category = await Category.findOne({ $or: [{ slug: cleanSlug }, { slug: id }, { name: id }] });
     }
 
-    if (name) category.name = name.trim();
-    if (description !== undefined) category.description = description;
-    if (image !== undefined) category.image = image;
-    if (isActive !== undefined) category.isActive = Boolean(isActive);
+    if (!category) {
+      const cleanSlug = id.replace(/^cust-root-|^cust-sub-/, "");
+      const newLevel = id.includes("sub") ? 1 : 0;
+      category = await Category.create({
+        name: name || cleanSlug,
+        slug: slug || cleanSlug,
+        description: description || "Category Description",
+        image: image || "",
+        level: newLevel,
+        isActive: isActive !== undefined ? Boolean(isActive) : true,
+      });
+    }
+
+    if (name !== undefined) {
+      if (!name.trim()) return next(new AppError("Category name cannot be empty", 400));
+      category.name = name.trim();
+    }
+    if (slug !== undefined && slug.trim()) {
+      category.slug = slug.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-");
+    }
+    if (description !== undefined) {
+      if (!description.trim() && isActive !== undefined && !name) {
+        // Active toggle only
+      } else if (!description.trim()) {
+        return next(new AppError("Category description cannot be empty", 400));
+      } else {
+        category.description = description.trim();
+      }
+    }
+    if (image !== undefined) {
+      if (!image.trim() && isActive !== undefined && !name) {
+        // Active toggle only
+      } else if (!image.trim()) {
+        return next(new AppError("Category image URL cannot be empty", 400));
+      } else {
+        category.image = image.trim();
+      }
+    }
+    if (isActive !== undefined) {
+      category.isActive = Boolean(isActive);
+    }
     if (displayOrder !== undefined) category.displayOrder = parseInt(displayOrder, 10) || 0;
 
     await category.save();
@@ -1255,13 +1451,42 @@ export const updateCategoryAdmin = async (req, res, next) => {
       action: "UPDATE_CATEGORY",
       targetResource: "Category",
       targetId: category._id,
-      details: `Updated category ${category.name}`,
+      details: `Updated category ${category.name} (Active: ${category.isActive})`,
     });
 
     res.status(200).json({
       success: true,
       message: "Category updated successfully",
       data: category,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const uploadCategoryImageAdmin = async (req, res, next) => {
+  try {
+    let fileSource = null;
+
+    if (req.file && req.file.buffer) {
+      fileSource = req.file.buffer;
+    } else if (req.body && (req.body.imageBase64 || req.body.image)) {
+      fileSource = req.body.imageBase64 || req.body.image;
+    }
+
+    if (!fileSource) {
+      return next(new AppError("No image file or data provided for upload", 400));
+    }
+
+    const uploaded = await uploadCategoryImageToCloudinary(fileSource);
+
+    return res.status(200).json({
+      success: true,
+      message: "Category image uploaded to Cloudinary successfully",
+      data: {
+        url: uploaded.url,
+        publicId: uploaded.publicId,
+      },
     });
   } catch (error) {
     next(error);
@@ -1298,7 +1523,7 @@ export const getAllProductsAdmin = async (req, res, next) => {
 
     const [products, total] = await Promise.all([
       Product.find(query)
-        .populate("vendor", "businessDetails.businessName")
+        .populate("vendor", "businessDetails.businessName storeName name")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
@@ -1313,6 +1538,53 @@ export const getAllProductsAdmin = async (req, res, next) => {
       totalPages: Math.ceil(total / limitNum) || 1,
       currentPage: pageNum,
       data: products,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getProductDetailsAdmin = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    let product = null;
+
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      product = await Product.findById(id)
+        .populate("vendor", "businessDetails sellerDetails brandDetails status storeName")
+        .populate("brandRef", "name logo categories status")
+        .lean();
+    }
+    if (!product) {
+      product = await Product.findOne({ slug: id })
+        .populate("vendor", "businessDetails sellerDetails brandDetails status storeName")
+        .populate("brandRef", "name logo categories status")
+        .lean();
+    }
+
+    if (!product) {
+      return next(new AppError("Product not found", 404));
+    }
+
+    // Check scope if admin
+    if (req.user.role !== "superadmin" && req.accessibleVendorIds) {
+      if (!req.accessibleVendorIds.includes(product.vendor?._id?.toString())) {
+        return next(new AppError("Unauthorized to view this vendor's product", 403));
+      }
+    }
+
+    // Compute purchase/order count from orders if 0
+    if (!product.ordersCount) {
+      const orderCount = await Order.countDocuments({
+        "items.product": product._id,
+        orderStatus: { $ne: "Cancelled" },
+      });
+      product.ordersCount = orderCount;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: product,
     });
   } catch (error) {
     next(error);
@@ -1341,7 +1613,10 @@ export const moderateProductAdmin = async (req, res, next) => {
     if (stock !== undefined) product.stock = Number(stock);
     if (category) product.category = category;
     if (subCategory !== undefined) product.subCategory = subCategory;
-    if (isActive !== undefined) product.isActive = Boolean(isActive);
+    if (isActive !== undefined) {
+      product.isActive = Boolean(isActive);
+      product.status = isActive ? "Active" : "Not Active";
+    }
 
     await product.save();
 
