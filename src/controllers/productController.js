@@ -233,6 +233,16 @@ export const createProduct = async (req, res, next) => {
     const numReorder = reorderLevel != null ? Number(reorderLevel) : 5;
     const numDiscountVal = Number(discountValue) || 0;
 
+    const isReturnable =
+      req.body.isReturnable === true || req.body.isReturnable === "true";
+    const isReplaceable =
+      req.body.isReplaceable === true || req.body.isReplaceable === "true";
+    const isRefundable =
+      req.body.isRefundable === true || req.body.isRefundable === "true";
+    const returnWindowDays = req.body.returnWindowDays
+      ? Math.max(0, Number(req.body.returnWindowDays))
+      : 7;
+
     const product = await Product.create({
       vendor: vendor._id,
       user: req.user._id || req.user.id,
@@ -259,6 +269,10 @@ export const createProduct = async (req, res, next) => {
       images: uploadedImages,
       variants: parsedVariants,
       tags: parsedTags,
+      isReturnable,
+      returnWindowDays,
+      isReplaceable,
+      isRefundable,
       status: status || "Active",
       visibility: parsedVisibility,
     });
@@ -677,6 +691,24 @@ export const updateProduct = async (req, res, next) => {
       try {
         updates.attributes = JSON.parse(updates.attributes);
       } catch {}
+    }
+    if (updates.isReturnable !== undefined) {
+      updates.isReturnable =
+        updates.isReturnable === true || updates.isReturnable === "true";
+    }
+    if (updates.isReplaceable !== undefined) {
+      updates.isReplaceable =
+        updates.isReplaceable === true || updates.isReplaceable === "true";
+    }
+    if (updates.isRefundable !== undefined) {
+      updates.isRefundable =
+        updates.isRefundable === true || updates.isRefundable === "true";
+    }
+    if (updates.returnWindowDays !== undefined) {
+      updates.returnWindowDays = Math.max(
+        0,
+        Number(updates.returnWindowDays) || 7
+      );
     }
     if (updates.visibility && typeof updates.visibility === "string") {
       try {

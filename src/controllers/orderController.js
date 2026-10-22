@@ -176,6 +176,10 @@ export const createOrder = async (req, res, next) => {
         imageUrl: imageUrl || clientItem.imageUrl || "",
         weight: dbProd.unit || clientItem.weight || "1 unit",
         category: dbProd.category || "",
+        isReturnable: !!dbProd.isReturnable,
+        returnWindowDays: dbProd.returnWindowDays || 7,
+        isReplaceable: !!dbProd.isReplaceable,
+        isRefundable: !!dbProd.isRefundable,
       });
 
       itemsTotal += verifiedPrice * qty;

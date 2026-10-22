@@ -215,7 +215,29 @@ const productSchema = new mongoose.Schema(
       max: 100,
     },
 
-    // 9. Meta
+    // 9. Return, Replacement & Refund Policy
+    isReturnable: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    returnWindowDays: {
+      type: Number,
+      default: 7,
+      min: 0,
+    },
+    isReplaceable: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    isRefundable: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    // 10. Meta
     ratingsAverage: {
       type: Number,
       default: 0,

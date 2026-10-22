@@ -1,4 +1,5 @@
 import Refund from "../models/Refund.js";
+import Product from "../models/Product.js";
 import Order from "../models/Order.js";
 import Vendor from "../models/Vendor.js";
 import { AppError } from "../middleware/errorMiddleware.js";
@@ -128,6 +129,53 @@ export const requestRefund = async (req, res, next) => {
         message: "Order cancelled and refund processed successfully.",
         data: refundResult.refund,
       });
+    }
+
+    // Validate product eligibility for Return, Replacement or Refund
+    if (claimType !== "CANCELLATION") {
+      const productIds = targetItems.map((i) => i.product).filter(Boolean);
+      if (productIds.length > 0) {
+        const dbProducts = await Product.find({ _id: { $in: productIds } });
+        const productMap = new Map(dbProducts.map((p) => [p._id.toString(), p]));
+
+        for (const item of targetItems) {
+          const prod = productMap.get(String(item.product));
+          if (prod) {
+            if (
+              (claimType === "RETURN" || claimType === "RETURN_REFUND") &&
+              !prod.isReturnable
+            ) {
+              return next(
+                new AppError(
+                  `Product "${item.name}" is not eligible for return. Only returnable products can be returned.`,
+                  400
+                )
+              );
+            }
+            if (claimType === "REPLACEMENT" && !prod.isReplaceable) {
+              return next(
+                new AppError(
+                  `Product "${item.name}" is not eligible for replacement.`,
+                  400
+                )
+              );
+            }
+            if (
+              (claimType === "REFUND" || claimType === "DEFECTIVE") &&
+              !prod.isRefundable &&
+              !prod.isReturnable &&
+              !prod.isReplaceable
+            ) {
+              return next(
+                new AppError(
+                  `Product "${item.name}" is not eligible for refund or return claims.`,
+                  400
+                )
+              );
+            }
+          }
+        }
+      }
     }
 
     // For delivered orders (returns, damaged, replacements), create request for vendor/admin approval

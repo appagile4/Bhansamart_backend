@@ -39,6 +39,22 @@ const orderItemSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    isReturnable: {
+      type: Boolean,
+      default: false,
+    },
+    returnWindowDays: {
+      type: Number,
+      default: 7,
+    },
+    isReplaceable: {
+      type: Boolean,
+      default: false,
+    },
+    isRefundable: {
+      type: Boolean,
+      default: false,
+    },
     category: {
       type: String,
       default: "",
