@@ -30,6 +30,26 @@ import {
   getLiveOperationalMapData,
   getAuditLogsAdmin,
 } from "../controllers/adminManagementController.js";
+import {
+  getMyAssignedVendors,
+  getVendorSalesAnalytics,
+  getVendorProductsAnalytics,
+  getDeliveryAssignmentsAdmin,
+  getDeliveryBoyProfileAdmin,
+  getDeliveryCodReconciliationAdmin,
+  raiseCodDisputeAdmin,
+  getVendorWithdrawalsAdmin,
+  examineVendorWithdrawalAdmin,
+  getBrandsReviewQueueAdmin,
+  reviewBrandAdmin,
+  getRefundsQueueAdmin,
+  staffExamineRefundAction,
+  updateRefundPickupAction,
+  recordRefundInspectionAction,
+  finalizeRefundPayoutAction,
+  getStaffNotificationsAdmin,
+  markStaffNotificationRead,
+} from "../controllers/staffAdminOperationsController.js";
 import { protect, authorizeRoles } from "../middleware/authMiddleware.js";
 import {
   enforceAdminVendorScope,
@@ -98,5 +118,46 @@ router.put("/platform-payment/config", requireSuperadminOnly, updatePlatformPaym
 
 // 12. Security & System Audit Trail (Superadmin Only)
 router.get("/audit-logs", requireSuperadminOnly, getAuditLogsAdmin);
+
+// ── 13. StaffAdmin Operations, Vendor Management & Refund Workflow ──
+router.get("/staff-operations/assigned-vendors", getMyAssignedVendors);
+
+// Sales & Product Analytics (supports query param ?vendorId=... or path param :vendorId)
+router.get("/staff-operations/sales-analytics", getVendorSalesAnalytics);
+router.get("/staff-operations/vendors/:vendorId/analytics", getVendorSalesAnalytics);
+router.get("/staff-operations/products-analytics", getVendorProductsAnalytics);
+router.get("/staff-operations/vendors/:vendorId/products-analytics", getVendorProductsAnalytics);
+
+// Delivery Assignments, Profiles & COD Reconciliation
+router.get("/staff-operations/delivery-assignments", getDeliveryAssignmentsAdmin);
+router.get("/staff-operations/delivery/assignments", getDeliveryAssignmentsAdmin);
+router.get("/staff-operations/delivery-boy-profile/:id", getDeliveryBoyProfileAdmin);
+router.get("/staff-operations/delivery/boys/:id", getDeliveryBoyProfileAdmin);
+router.get("/staff-operations/delivery-cod-reconciliation", getDeliveryCodReconciliationAdmin);
+router.get("/staff-operations/delivery/cod-reconciliation", getDeliveryCodReconciliationAdmin);
+router.post("/staff-operations/delivery-cod-dispute", raiseCodDisputeAdmin);
+router.post("/staff-operations/delivery/cod-dispute", raiseCodDisputeAdmin);
+
+// Vendor Withdrawals
+router.get("/staff-operations/withdrawals", getVendorWithdrawalsAdmin);
+router.patch("/staff-operations/withdrawals/:id/examine", examineVendorWithdrawalAdmin);
+
+// Brand Review Queue
+router.get("/staff-operations/brands-queue", getBrandsReviewQueueAdmin);
+router.get("/staff-operations/brands", getBrandsReviewQueueAdmin);
+router.patch("/staff-operations/brands-queue/:id/review", reviewBrandAdmin);
+router.patch("/staff-operations/brands/:id/review", reviewBrandAdmin);
+
+// Refund & Returns Lifecycle
+router.get("/staff-operations/refunds-queue", getRefundsQueueAdmin);
+router.get("/staff-operations/refunds", getRefundsQueueAdmin);
+router.patch("/staff-operations/refunds/:id/examine", staffExamineRefundAction);
+router.patch("/staff-operations/refunds/:id/pickup", updateRefundPickupAction);
+router.patch("/staff-operations/refunds/:id/inspection", recordRefundInspectionAction);
+router.patch("/staff-operations/refunds/:id/finalize-payout", requireSuperadminOnly, finalizeRefundPayoutAction);
+
+// Real-Time Notifications
+router.get("/staff-operations/notifications", getStaffNotificationsAdmin);
+router.patch("/staff-operations/notifications/:id/read", markStaffNotificationRead);
 
 export default router;

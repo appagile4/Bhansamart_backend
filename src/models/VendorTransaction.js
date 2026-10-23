@@ -101,6 +101,24 @@ const vendorTransactionSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    internalNotes: {
+      type: String,
+      default: "",
+    },
+    escalationStatus: {
+      type: String,
+      enum: ["PENDING_REVIEW", "EXAMINED_ESCALATED", "INFO_REQUESTED", "SETTLED", "REJECTED"],
+      default: "PENDING_REVIEW",
+    },
+    rejectionReason: {
+      type: String,
+      default: "",
+    },
     timestamp: {
       type: Date,
       default: Date.now,

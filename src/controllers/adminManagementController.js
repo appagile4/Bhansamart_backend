@@ -1144,6 +1144,14 @@ export const getAllDeliveryBoysAdmin = async (req, res, next) => {
     const query = {};
     if (availability) query.availability = availability;
     if (status) query.approvalStatus = status;
+    if (search && search.trim()) {
+      const searchRegex = new RegExp(search.trim(), "i");
+      query.$or = [
+        { fullName: searchRegex },
+        { phone: searchRegex },
+        { "vehicleDetails.registrationNumber": searchRegex },
+      ];
+    }
 
     const deliveryBoys = await DeliveryBoy.find(query)
       .populate("user", "name email phone isActive")
@@ -1151,10 +1159,26 @@ export const getAllDeliveryBoysAdmin = async (req, res, next) => {
       .sort({ updatedAt: -1 })
       .lean();
 
+    const formattedRiders = deliveryBoys.map((db) => {
+      const isOnline = db.availability === "ONLINE" || db.availability === "BUSY";
+      const isBusy = db.availability === "BUSY" || Boolean(db.activeOrderId);
+      return {
+        ...db,
+        name: db.fullName || db.user?.name || "Delivery Partner",
+        phone: db.phone || db.user?.phone || "",
+        isOnline,
+        isBusy,
+        cashInHand: db.codCashInCustody || 0,
+        vehicleNumber: db.vehicleDetails?.registrationNumber || db.vehicleDetails?.vehicleType || "Not assigned",
+        completedDeliveries: db.metrics?.totalDeliveries || 0,
+        location: db.currentLocation || { coordinates: [0, 0] },
+      };
+    });
+
     res.status(200).json({
       success: true,
-      count: deliveryBoys.length,
-      data: deliveryBoys,
+      count: formattedRiders.length,
+      data: formattedRiders,
     });
   } catch (error) {
     next(error);
@@ -1814,19 +1838,34 @@ export const getPlatformPaymentConfigAdmin = async (req, res, next) => {
 
 export const updatePlatformPaymentConfigAdmin = async (req, res, next) => {
   try {
-    const { bankDetails, enabledPaymentMethods } = req.body;
+    const { bankDetails, enabledPaymentMethods, paymentMethods } = req.body;
 
     const config = await PlatformPaymentConfig.getGlobalConfig();
 
     if (bankDetails) {
       config.bankDetails = {
-        ...config.bankDetails,
+        ...(config.bankDetails ? config.bankDetails.toObject() : {}),
         ...bankDetails,
       };
     }
 
     if (Array.isArray(enabledPaymentMethods)) {
       config.enabledPaymentMethods = enabledPaymentMethods;
+    } else if (paymentMethods && typeof paymentMethods === "object") {
+      const currentList = config.enabledPaymentMethods ? config.enabledPaymentMethods.toObject() : [];
+      const updatedList = currentList.map((m) => {
+        if (paymentMethods[m.methodKey]) {
+          return {
+            ...m,
+            isEnabled: paymentMethods[m.methodKey].isEnabled !== undefined ? Boolean(paymentMethods[m.methodKey].isEnabled) : m.isEnabled,
+            maxAmount: Number(paymentMethods[m.methodKey].maxOrderAmount || paymentMethods[m.methodKey].maxAmount) || m.maxAmount,
+            accountIdentifier: paymentMethods[m.methodKey].accountIdentifier || m.accountIdentifier,
+            qrCodeImageUrl: paymentMethods[m.methodKey].qrCodeImageUrl || m.qrCodeImageUrl,
+          };
+        }
+        return m;
+      });
+      config.enabledPaymentMethods = updatedList;
     }
 
     config.updatedBy = req.user._id;
@@ -1856,13 +1895,14 @@ export const updatePlatformPaymentConfigAdmin = async (req, res, next) => {
 export const getActiveCheckoutPaymentMethods = async (req, res, next) => {
   try {
     const config = await PlatformPaymentConfig.getGlobalConfig();
-    const activeMethods = config.enabledPaymentMethods.filter((m) => m.isEnabled);
+    const activeMethods = (config.enabledPaymentMethods || []).filter((m) => m.isEnabled);
 
     res.status(200).json({
       success: true,
       data: {
         paymentMethods: activeMethods,
-        bankDetails: config.bankDetails.isActive ? config.bankDetails : null,
+        bankDetails: config.bankDetails?.isActive ? config.bankDetails : null,
+        fullConfig: config,
       },
     });
   } catch (error) {
@@ -2076,11 +2116,16 @@ export const getLiveOperationalMapData = async (req, res, next) => {
       .filter((v) => v.shippingLocations?.latitude && v.shippingLocations?.longitude)
       .map((v) => ({
         id: v._id,
+        _id: v._id,
         type: "vendor",
         name: v.businessDetails?.businessName || "Store",
+        storeName: v.businessDetails?.businessName || "Store",
         phone: v.sellerDetails?.sellerPhone || "",
         latitude: v.shippingLocations.latitude,
         longitude: v.shippingLocations.longitude,
+        location: {
+          coordinates: [v.shippingLocations.longitude, v.shippingLocations.latitude],
+        },
         isOpen: v.isStoreOpen,
         radiusKm: v.deliveryRadiusKm || 5,
       }));
@@ -2089,12 +2134,17 @@ export const getLiveOperationalMapData = async (req, res, next) => {
       .filter((r) => r.currentLocation?.coordinates?.length === 2)
       .map((r) => ({
         id: r._id,
+        _id: r._id,
         type: "delivery_partner",
         name: r.fullName || r.user?.name || "Rider",
         phone: r.phone || r.user?.phone || "",
         latitude: r.currentLocation.coordinates[1],
         longitude: r.currentLocation.coordinates[0],
+        location: {
+          coordinates: [r.currentLocation.coordinates[0], r.currentLocation.coordinates[1]],
+        },
         availability: r.availability,
+        isOnline: r.availability !== "OFFLINE",
         isBusy: r.availability === "BUSY",
         lastUpdated: r.lastLocationUpdatedAt,
       }));

@@ -4,6 +4,7 @@ import User from "../models/User.js";
 import Vendor from "../models/Vendor.js";
 import Order from "../models/Order.js";
 import DeliveryBoy from "../models/DeliveryBoy.js";
+import Notification from "../models/Notification.js";
 
 let io = null;
 
@@ -114,6 +115,22 @@ export const initSocket = (httpServer) => {
       const deliveryRoom = `delivery:${socket.deliveryBoyId}`;
       socket.join(deliveryRoom);
       console.log(`[Socket] Delivery Partner ${socket.deliveryBoyId} joined room ${deliveryRoom}`);
+      emitDeliveryPartnerStatus(socket.deliveryBoyId, {
+        availability: "ONLINE",
+        isOnline: true,
+      });
+    }
+
+    // Auto-join staff admin & vendor rooms
+    if (socket.role === "admin" || socket.role === "superadmin") {
+      socket.join(`role:${socket.role}`);
+      if (socket.user?.assignedVendors && Array.isArray(socket.user.assignedVendors)) {
+        for (const vId of socket.user.assignedVendors) {
+          const vStr = vId?._id ? vId._id.toString() : vId.toString();
+          socket.join(`staff_vendor:${vStr}`);
+        }
+      }
+      console.log(`[Socket] Admin/Staff ${socket.userId} joined role:${socket.role}`);
     }
 
     // ── 3. Client Event: Subscribe to Order Tracking Room ───────────────
@@ -506,6 +523,12 @@ export const initSocket = (httpServer) => {
 
     socket.on("disconnect", (reason) => {
       console.log(`[Socket Disconnected] ${socket.id} (Reason: ${reason})`);
+      if (socket.deliveryBoyId) {
+        emitDeliveryPartnerStatus(socket.deliveryBoyId, {
+          availability: "OFFLINE",
+          isOnline: false,
+        });
+      }
     });
   });
 
@@ -637,6 +660,20 @@ export const emitToOrderRoom = (orderId, event, data) => {
 };
 
 /**
+ * Real-time notification helper: Broadcast delivery partner availability & location to admin/stores
+ */
+export const emitDeliveryPartnerStatus = (deliveryBoyId, statusData) => {
+  if (!io || !deliveryBoyId) return;
+  const payload = {
+    deliveryBoyId: deliveryBoyId.toString(),
+    ...statusData,
+    updatedAt: new Date(),
+  };
+  io.emit("delivery:rider:status", payload);
+  console.log(`[Socket Emitted] delivery:rider:status for ${deliveryBoyId}:`, statusData);
+};
+
+/**
  * Real-time notification helper: Emit live GPS update for an order
  */
 export const emitDeliveryLocationUpdate = (orderId, locationData) => {
@@ -706,4 +743,68 @@ export const emitVendorAvailabilityChanged = (vendorId, isStoreOpen, storeName =
   };
   io.emit("vendor:availability:changed", payload);
   console.log(`[Socket Emitted] vendor:availability:changed for vendor ${vendorId}: isStoreOpen=${isStoreOpen}`);
+};
+
+/**
+ * Real-time notification helper: Scoped notification to StaffAdmins assigned to vendor + Superadmin
+ */
+export const notifyStaffAdminsForVendor = async ({
+  vendorId,
+  eventType,
+  title,
+  message,
+  data = {},
+}) => {
+  try {
+    const vStr = vendorId ? vendorId.toString() : null;
+
+    // 1. Emit to scoped vendor room
+    if (io && vStr) {
+      io.to(`staff_vendor:${vStr}`).emit(eventType, {
+        title,
+        message,
+        data: { ...data, vendorId: vStr },
+        timestamp: new Date(),
+      });
+    }
+
+    // 2. Find all StaffAdmins assigned to this vendor + Superadmins
+    const query = {
+      role: { $in: ["admin", "superadmin"] },
+      isActive: true,
+    };
+    if (vStr) {
+      query.$or = [{ role: "superadmin" }, { assignedVendors: vStr }];
+    }
+
+    const staffAdmins = await User.find(query).select("_id role email");
+
+    for (const staff of staffAdmins) {
+      // Persist in Notification model
+      try {
+        await Notification.create({
+          user: staff._id,
+          title,
+          message,
+          type: eventType.startsWith("staff_") ? eventType : "staff_alert",
+          data: { ...data, vendorId: vStr },
+        });
+      } catch (dbErr) {
+        // Idempotency or silent catch
+      }
+
+      // Real-time emit to staff admin's private room
+      if (io) {
+        io.to(`user:${staff._id.toString()}`).emit(eventType, {
+          title,
+          message,
+          data: { ...data, vendorId: vStr },
+          timestamp: new Date(),
+        });
+      }
+    }
+    console.log(`[Staff Notification] ${eventType} dispatched for vendor ${vStr} to ${staffAdmins.length} staff admins`);
+  } catch (err) {
+    console.error("[notifyStaffAdminsForVendor] Error:", err.message);
+  }
 };

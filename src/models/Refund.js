@@ -123,10 +123,100 @@ const refundSchema = new mongoose.Schema(
         "COMPLETED",
         "REJECTED",
         "FAILED",
+        "VENDOR_REVIEW",
+        "VENDOR_ACCEPTED",
+        "VENDOR_REJECTED",
+        "VENDOR_INFO_REQUIRED",
+        "STAFF_EXAMINING",
+        "FORWARDED_TO_FINANCE",
+        "RETURN_PICKUP_SCHEDULED",
+        "RETURN_PICKED_UP",
+        "RETURN_RECEIVED",
+        "INSPECTED_PASSED",
+        "INSPECTED_FAILED",
       ],
       default: "REQUESTED",
       index: true,
     },
+    // Vendor Initial Review
+    vendorReview: {
+      decision: {
+        type: String,
+        enum: ["PENDING", "ACCEPTED", "REJECTED", "INFO_REQUIRED"],
+        default: "PENDING",
+      },
+      notes: { type: String, default: "" },
+      respondedAt: { type: Date, default: null },
+      proofImages: [{ type: String }],
+    },
+    // StaffAdmin Operational Examination
+    staffReview: {
+      reviewer: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      reviewerName: { type: String, default: "" },
+      notes: { type: String, default: "" },
+      isExamined: { type: Boolean, default: false },
+      examinedAt: { type: Date, default: null },
+      forwardedToFinance: { type: Boolean, default: false },
+      forwardedAt: { type: Date, default: null },
+    },
+    // Reverse Return Pickup
+    pickup: {
+      required: { type: Boolean, default: false },
+      deliveryBoy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "DeliveryBoy",
+        default: null,
+      },
+      status: {
+        type: String,
+        enum: [
+          "NOT_REQUIRED",
+          "PENDING_ASSIGNMENT",
+          "ASSIGNED",
+          "OUT_FOR_PICKUP",
+          "PICKED_UP",
+          "RECEIVED_AT_VENDOR",
+          "FAILED",
+        ],
+        default: "NOT_REQUIRED",
+      },
+      scheduledAt: { type: Date, default: null },
+      pickedUpAt: { type: Date, default: null },
+      receivedAt: { type: Date, default: null },
+      failureReason: { type: String, default: "" },
+      notes: { type: String, default: "" },
+    },
+    // Item Inspection
+    inspection: {
+      required: { type: Boolean, default: false },
+      result: {
+        type: String,
+        enum: ["NOT_REQUIRED", "PENDING", "PASSED", "FAILED"],
+        default: "NOT_REQUIRED",
+      },
+      notes: { type: String, default: "" },
+      inspectedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      inspectedAt: { type: Date, default: null },
+      proofImages: [{ type: String }],
+    },
+    // Audit Timeline
+    timeline: [
+      {
+        status: { type: String, required: true },
+        actorRole: { type: String, default: "system" },
+        actorName: { type: String, default: "" },
+        notes: { type: String, default: "" },
+        timestamp: { type: Date, default: Date.now },
+      },
+    ],
     gatewayRefundId: {
       type: String,
       default: "",

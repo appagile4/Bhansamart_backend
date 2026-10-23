@@ -4,7 +4,7 @@ import Order from "../models/Order.js";
 import Vendor from "../models/Vendor.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import { processOrderRefund } from "../services/financeLedgerService.js";
-import { emitOrderStatusUpdate } from "../socket/socketManager.js";
+import { emitOrderStatusUpdate, notifyStaffAdminsForVendor } from "../socket/socketManager.js";
 
 /**
  * @desc    Customer submits a Cancellation, Return, Refund or Replacement request
@@ -194,7 +194,16 @@ export const requestRefund = async (req, res, next) => {
       reason: reason.trim(),
       description: description || "",
       proofImages,
-      status: "REQUESTED",
+      status: "VENDOR_REVIEW",
+      timeline: [
+        {
+          status: "VENDOR_REVIEW",
+          actorRole: "customer",
+          actorName: req.user.name || "Customer",
+          notes: `Customer initiated ${claimType} request: ${reason.trim()}`,
+          timestamp: new Date(),
+        },
+      ],
       customerPayoutDetails: {
         method: customerPayoutDetails.method || (order.paymentMethod === "Cash on delivery" ? "UPI" : "GATEWAY_REVERSAL"),
         upiId: customerPayoutDetails.upiId || "",
@@ -211,6 +220,15 @@ export const requestRefund = async (req, res, next) => {
     orderObj.refundDetails = refund.toObject ? refund.toObject() : refund;
     emitOrderStatusUpdate(order._id.toString(), customerId.toString(), orderObj);
 
+    // Scoped Real-time alert to StaffAdmins assigned to this vendor
+    await notifyStaffAdminsForVendor({
+      vendorId: order.vendor._id,
+      eventType: "staff_refund:new",
+      title: `New ${claimType === "REPLACEMENT" ? "Replacement" : "Return"} Claim Submitted`,
+      message: `Customer requested ${claimType.toLowerCase()} for Order #${order.orderNumber}. Awaiting store response.`,
+      data: { refundId: refund._id, orderId: order._id, claimType, amount: claimAmount },
+    });
+
     res.status(201).json({
       success: true,
       message: `${claimType === "REPLACEMENT" ? "Replacement" : "Refund"} request submitted successfully. Awaiting review.`,
@@ -226,6 +244,79 @@ export const requestRefund = async (req, res, next) => {
  * @route   PATCH /api/refunds/:id/approve
  * @access  Private (Vendor / Admin)
  */
+/**
+ * @desc    Vendor performs initial review of return/refund/replacement claim
+ * @route   PATCH /api/refunds/:id/vendor-review
+ * @access  Private (Vendor)
+ */
+export const vendorReviewRefund = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { decision, notes = "", proofImages = [] } = req.body;
+
+    const refund = await Refund.findById(id).populate("order");
+    if (!refund) {
+      return next(new AppError("Refund request not found", 404));
+    }
+
+    // Verify logged in vendor ownership
+    const vendor = await Vendor.findOne({ userId: req.user._id });
+    if (!vendor || vendor._id.toString() !== refund.vendor.toString()) {
+      return next(
+        new AppError("Unauthorized. Only the order store vendor can review this request.", 403)
+      );
+    }
+
+    refund.vendorReview = {
+      decision, // ACCEPTED | REJECTED | INFO_REQUIRED
+      notes,
+      respondedAt: new Date(),
+      proofImages,
+    };
+
+    if (decision === "ACCEPTED") {
+      refund.status = "STAFF_EXAMINING";
+    } else if (decision === "REJECTED") {
+      refund.status = "VENDOR_REJECTED";
+      refund.rejectionReason = notes || "Rejected by vendor initial review";
+    } else if (decision === "INFO_REQUIRED") {
+      refund.status = "VENDOR_INFO_REQUIRED";
+    }
+
+    refund.timeline.push({
+      status: refund.status,
+      actorRole: "vendor",
+      actorName: vendor.businessDetails?.businessName || req.user.name,
+      notes: `Vendor decision: ${decision}. Notes: ${notes}`,
+      timestamp: new Date(),
+    });
+
+    await refund.save();
+
+    // Alert assigned StaffAdmins in real time
+    await notifyStaffAdminsForVendor({
+      vendorId: refund.vendor,
+      eventType: "staff_refund:vendor_responded",
+      title: `Vendor ${decision === "ACCEPTED" ? "Accepted" : "Responded to"} Return Claim`,
+      message: `Store ${vendor.businessDetails?.businessName} responded to ${refund.refundNumber}. StaffAdmin examination ready.`,
+      data: {
+        refundId: refund._id,
+        refundNumber: refund.refundNumber,
+        decision,
+        status: refund.status,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Vendor review submitted: ${decision}`,
+      refund,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const approveRefund = async (req, res, next) => {
   try {
     const { id } = req.params;

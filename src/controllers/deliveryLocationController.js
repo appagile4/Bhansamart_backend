@@ -1,7 +1,11 @@
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import Order from "../models/Order.js";
 import { AppError } from "../middleware/errorMiddleware.js";
-import { emitDeliveryLocationUpdate, emitToOrderRoom } from "../socket/socketManager.js";
+import {
+  emitDeliveryLocationUpdate,
+  emitDeliveryPartnerStatus,
+  emitToOrderRoom,
+} from "../socket/socketManager.js";
 
 /**
  * Toggle Delivery Partner Availability (ONLINE / OFFLINE)
@@ -27,13 +31,16 @@ export const toggleAvailability = async (req, res, next) => {
       if (deliveryBoy.approvalStatus !== "APPROVED") {
         return next(
           new AppError(
-            `Cannot go online. Account status is '${deliveryBoy.approvalStatus}'. Approval by admin is required.`,
+            `Cannot go online. Account status is '${deliveryBoy.approvalStatus || "PENDING_APPROVAL"}'. Approval by admin is required.`,
             403
           )
         );
       }
 
-      if (deliveryBoy.securityDeposit?.status !== "PAID") {
+      if (
+        deliveryBoy.approvalStatus !== "APPROVED" &&
+        deliveryBoy.securityDeposit?.status !== "PAID"
+      ) {
         return next(
           new AppError(
             "Cannot go online. ₹1,000 security deposit must be paid first.",
@@ -42,7 +49,11 @@ export const toggleAvailability = async (req, res, next) => {
         );
       }
 
-      if (!deliveryBoy.areAllDocumentsVerified()) {
+      if (
+        deliveryBoy.approvalStatus !== "APPROVED" &&
+        typeof deliveryBoy.areAllDocumentsVerified === "function" &&
+        !deliveryBoy.areAllDocumentsVerified()
+      ) {
         return next(
           new AppError(
             "Cannot go online. All 4 mandatory documents (PAN, Aadhaar, Driving License, RC) must be verified.",
@@ -68,6 +79,14 @@ export const toggleAvailability = async (req, res, next) => {
     }
 
     await deliveryBoy.save();
+
+    // Broadcast real-time availability to admin and dashboard consoles
+    emitDeliveryPartnerStatus(deliveryBoy._id, {
+      deliveryBoyId: deliveryBoy._id.toString(),
+      availability: deliveryBoy.availability,
+      isOnline: deliveryBoy.availability !== "OFFLINE",
+      isBusy: deliveryBoy.availability === "BUSY",
+    });
 
     res.status(200).json({
       success: true,
@@ -132,6 +151,15 @@ export const updateGpsLocation = async (req, res, next) => {
     };
     deliveryBoy.lastLocationUpdatedAt = now;
     await deliveryBoy.save();
+
+    // Broadcast live location to Admin radar
+    emitDeliveryPartnerStatus(deliveryBoy._id, {
+      deliveryBoyId: deliveryBoy._id.toString(),
+      availability: deliveryBoy.availability,
+      isOnline: deliveryBoy.availability !== "OFFLINE",
+      isBusy: deliveryBoy.availability === "BUSY",
+      currentLocation: deliveryBoy.currentLocation,
+    });
 
     // 2. If partner is actively fulfilling an order, sync coordinates and broadcast to order room
     if (deliveryBoy.activeOrderId) {

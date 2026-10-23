@@ -57,6 +57,20 @@ const brandSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    reviewerNotes: {
+      type: String,
+      default: "",
+    },
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    reviewedAt: {
+      type: Date,
+      default: null,
+    },
+    supportingDocuments: [{ type: String }],
     metadata: {
       origin: { type: String, default: "vendor_panel" },
       website: { type: String, default: "" },

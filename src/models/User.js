@@ -110,6 +110,11 @@ const userSchema = new mongoose.Schema(
       canViewOrders: { type: Boolean, default: true },
       canSendNotifications: { type: Boolean, default: true },
       canViewAnalytics: { type: Boolean, default: true },
+      canReviewWithdrawals: { type: Boolean, default: true },
+      canReviewBrands: { type: Boolean, default: true },
+      canExamineRefunds: { type: Boolean, default: true },
+      canReconcileCod: { type: Boolean, default: true },
+      canTrackDeliveries: { type: Boolean, default: true },
     },
 
     // OTP for Login / Verification
