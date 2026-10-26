@@ -46,8 +46,7 @@ export const initSocket = (httpServer) => {
   io.use(async (socket, next) => {
     try {
       const authHeader =
-        socket.handshake.auth?.token ||
-        socket.handshake.headers?.authorization;
+        socket.handshake.auth?.token || socket.handshake.headers?.authorization;
 
       let token = authHeader;
       if (token && token.startsWith("Bearer ")) {
@@ -55,15 +54,19 @@ export const initSocket = (httpServer) => {
       }
 
       if (!token) {
-        return next(new Error("Authentication token required for Socket connection"));
+        return next(
+          new Error("Authentication token required for Socket connection"),
+        );
       }
 
       const decoded = jwt.verify(
         token,
-        process.env.JWT_SECRET || "default_jwt_secret_change_in_production"
+        process.env.JWT_SECRET || "default_jwt_secret_change_in_production",
       );
 
-      const user = await User.findById(decoded.userId).select("+role +isActive");
+      const user = await User.findById(decoded.userId).select(
+        "+role +isActive",
+      );
       if (!user || !user.isActive) {
         return next(new Error("User account is invalid or deactivated"));
       }
@@ -94,7 +97,7 @@ export const initSocket = (httpServer) => {
   // ── 2. Socket Connection & Room Routing ──────────────────────────────
   io.on("connection", (socket) => {
     console.log(
-      `[Socket Connected] Socket ID: ${socket.id} | User: ${socket.user?.name} (${socket.userId}) | Role: ${socket.role}`
+      `[Socket Connected] Socket ID: ${socket.id} | User: ${socket.user?.name} (${socket.userId}) | Role: ${socket.role}`,
     );
 
     // Auto-join personal user room for targeted customer notifications
@@ -107,14 +110,18 @@ export const initSocket = (httpServer) => {
       const vendorRoom = `vendor:${socket.vendorId}`;
       socket.join(storeRoom);
       socket.join(vendorRoom);
-      console.log(`[Socket] Vendor ${socket.vendorId} joined room ${storeRoom}`);
+      console.log(
+        `[Socket] Vendor ${socket.vendorId} joined room ${storeRoom}`,
+      );
     }
 
     // Auto-join delivery room if authorized delivery partner
     if (socket.deliveryBoyId) {
       const deliveryRoom = `delivery:${socket.deliveryBoyId}`;
       socket.join(deliveryRoom);
-      console.log(`[Socket] Delivery Partner ${socket.deliveryBoyId} joined room ${deliveryRoom}`);
+      console.log(
+        `[Socket] Delivery Partner ${socket.deliveryBoyId} joined room ${deliveryRoom}`,
+      );
       emitDeliveryPartnerStatus(socket.deliveryBoyId, {
         availability: "ONLINE",
         isOnline: true,
@@ -124,13 +131,18 @@ export const initSocket = (httpServer) => {
     // Auto-join staff admin & vendor rooms
     if (socket.role === "admin" || socket.role === "superadmin") {
       socket.join(`role:${socket.role}`);
-      if (socket.user?.assignedVendors && Array.isArray(socket.user.assignedVendors)) {
+      if (
+        socket.user?.assignedVendors &&
+        Array.isArray(socket.user.assignedVendors)
+      ) {
         for (const vId of socket.user.assignedVendors) {
           const vStr = vId?._id ? vId._id.toString() : vId.toString();
           socket.join(`staff_vendor:${vStr}`);
         }
       }
-      console.log(`[Socket] Admin/Staff ${socket.userId} joined role:${socket.role}`);
+      console.log(
+        `[Socket] Admin/Staff ${socket.userId} joined role:${socket.role}`,
+      );
     }
 
     // ── 3. Client Event: Subscribe to Order Tracking Room ───────────────
@@ -138,20 +150,27 @@ export const initSocket = (httpServer) => {
       try {
         const orderId = String(data?.orderId || "").trim();
         if (!orderId) {
-          if (typeof ack === "function") ack({ success: false, message: "Order ID is required" });
+          if (typeof ack === "function")
+            ack({ success: false, message: "Order ID is required" });
           return;
         }
 
         // Validate customer ownership or vendor store ownership
-        const order = await Order.findById(orderId).select("customer vendor assignedDeliveryBoy");
+        const order = await Order.findById(orderId).select(
+          "customer vendor assignedDeliveryBoy",
+        );
         if (!order) {
-          if (typeof ack === "function") ack({ success: false, message: "Order not found" });
+          if (typeof ack === "function")
+            ack({ success: false, message: "Order not found" });
           return;
         }
 
-        const isCustomerOwner = order.customer && order.customer.toString() === socket.userId;
+        const isCustomerOwner =
+          order.customer && order.customer.toString() === socket.userId;
         const isVendorOwner =
-          (socket.vendorId && order.vendor && order.vendor.toString() === socket.vendorId) ||
+          (socket.vendorId &&
+            order.vendor &&
+            order.vendor.toString() === socket.vendorId) ||
           socket.user?.role === "vendor" ||
           socket.role === "vendor" ||
           Boolean(socket.vendorId);
@@ -161,22 +180,33 @@ export const initSocket = (httpServer) => {
           order.assignedDeliveryBoy.toString() === socket.deliveryBoyId;
         const isAdmin = socket.role === "admin" || socket.role === "superadmin";
 
-        if (!isCustomerOwner && !isVendorOwner && !isDeliveryOwner && !isAdmin) {
+        if (
+          !isCustomerOwner &&
+          !isVendorOwner &&
+          !isDeliveryOwner &&
+          !isAdmin
+        ) {
           if (typeof ack === "function")
-            ack({ success: false, message: "Unauthorized access to this order room" });
+            ack({
+              success: false,
+              message: "Unauthorized access to this order room",
+            });
           return;
         }
 
         const orderRoom = `order:${orderId}`;
         socket.join(orderRoom);
-        console.log(`[Socket] User ${socket.userId} joined order room: ${orderRoom}`);
+        console.log(
+          `[Socket] User ${socket.userId} joined order room: ${orderRoom}`,
+        );
 
         if (typeof ack === "function") {
           ack({ success: true, room: orderRoom });
         }
       } catch (err) {
         console.error("[customer:order:subscribe error]:", err);
-        if (typeof ack === "function") ack({ success: false, message: "Subscription error" });
+        if (typeof ack === "function")
+          ack({ success: false, message: "Subscription error" });
       }
     });
 
@@ -195,7 +225,8 @@ export const initSocket = (httpServer) => {
         console.log(`[Socket] Vendor ${socket.vendorId} subscribed to ${room}`);
         if (typeof ack === "function") ack({ success: true, room });
       } catch (err) {
-        if (typeof ack === "function") ack({ success: false, message: err.message });
+        if (typeof ack === "function")
+          ack({ success: false, message: err.message });
       }
     });
 
@@ -205,7 +236,10 @@ export const initSocket = (httpServer) => {
         const orderId = String(data?.orderId || "").trim();
         if (!orderId || !socket.vendorId) {
           if (typeof ack === "function")
-            ack({ success: false, message: "Missing order ID or vendor unauthorized" });
+            ack({
+              success: false,
+              message: "Missing order ID or vendor unauthorized",
+            });
           return;
         }
 
@@ -229,7 +263,7 @@ export const initSocket = (httpServer) => {
               },
             },
           },
-          { returnDocument: "after" }
+          { returnDocument: "after" },
         )
           .populate("vendor", "businessDetails sellerDetails")
           .populate("customer", "name phone email");
@@ -238,13 +272,18 @@ export const initSocket = (httpServer) => {
           if (typeof ack === "function")
             ack({
               success: false,
-              message: "Order cannot be accepted (it may already be processed or belongs to another store).",
+              message:
+                "Order cannot be accepted (it may already be processed or belongs to another store).",
             });
           return;
         }
 
         // Notify customer in real-time
-        emitOrderStatusUpdate(order._id.toString(), order.customer?._id?.toString(), order);
+        emitOrderStatusUpdate(
+          order._id.toString(),
+          order.customer?._id?.toString(),
+          order,
+        );
 
         // Automatically dispatch to nearest available delivery partner
         import("../utils/dispatchEngine.js")
@@ -262,7 +301,10 @@ export const initSocket = (httpServer) => {
       } catch (err) {
         console.error("[vendor:order:accept error]:", err);
         if (typeof ack === "function")
-          ack({ success: false, message: err.message || "Failed to accept order" });
+          ack({
+            success: false,
+            message: err.message || "Failed to accept order",
+          });
       }
     });
 
@@ -270,11 +312,16 @@ export const initSocket = (httpServer) => {
     socket.on("vendor:order:reject", async (data, ack) => {
       try {
         const orderId = String(data?.orderId || "").trim();
-        const reason = String(data?.reason || "Item unavailable / Kitchen busy").trim();
+        const reason = String(
+          data?.reason || "Item unavailable / Kitchen busy",
+        ).trim();
 
         if (!orderId || !socket.vendorId) {
           if (typeof ack === "function")
-            ack({ success: false, message: "Missing order ID or vendor unauthorized" });
+            ack({
+              success: false,
+              message: "Missing order ID or vendor unauthorized",
+            });
           return;
         }
 
@@ -298,7 +345,7 @@ export const initSocket = (httpServer) => {
               },
             },
           },
-          { returnDocument: "after" }
+          { returnDocument: "after" },
         )
           .populate("vendor", "businessDetails sellerDetails")
           .populate("customer", "name phone email");
@@ -307,13 +354,18 @@ export const initSocket = (httpServer) => {
           if (typeof ack === "function")
             ack({
               success: false,
-              message: "Order cannot be rejected (it may already be processed).",
+              message:
+                "Order cannot be rejected (it may already be processed).",
             });
           return;
         }
 
         // Notify customer in real-time
-        emitOrderStatusUpdate(order._id.toString(), order.customer?._id?.toString(), order);
+        emitOrderStatusUpdate(
+          order._id.toString(),
+          order.customer?._id?.toString(),
+          order,
+        );
 
         if (typeof ack === "function") {
           ack({ success: true, order });
@@ -321,7 +373,10 @@ export const initSocket = (httpServer) => {
       } catch (err) {
         console.error("[vendor:order:reject error]:", err);
         if (typeof ack === "function")
-          ack({ success: false, message: err.message || "Failed to reject order" });
+          ack({
+            success: false,
+            message: err.message || "Failed to reject order",
+          });
       }
     });
 
@@ -338,7 +393,10 @@ export const initSocket = (httpServer) => {
         const lng = parseFloat(data?.longitude);
         if (isNaN(lat) || isNaN(lng)) {
           if (typeof ack === "function")
-            ack({ success: false, message: "Invalid latitude or longitude coordinates" });
+            ack({
+              success: false,
+              message: "Invalid latitude or longitude coordinates",
+            });
           return;
         }
 
@@ -356,7 +414,7 @@ export const initSocket = (httpServer) => {
               lastLocationUpdatedAt: now,
             },
           },
-          { returnDocument: "after" }
+          { returnDocument: "after" },
         );
 
         // 2. If partner is actively fulfilling an order, sync coordinates and broadcast
@@ -384,7 +442,7 @@ export const initSocket = (httpServer) => {
 
           io.to(`order:${partner.activeOrderId}`).emit(
             "delivery:location:update",
-            locPayload
+            locPayload,
           );
         }
 
@@ -393,7 +451,8 @@ export const initSocket = (httpServer) => {
         }
       } catch (err) {
         console.error("[delivery:location:update error]:", err);
-        if (typeof ack === "function") ack({ success: false, message: err.message });
+        if (typeof ack === "function")
+          ack({ success: false, message: err.message });
       }
     });
 
@@ -403,11 +462,16 @@ export const initSocket = (httpServer) => {
         const orderId = String(data?.orderId || "").trim();
         if (!orderId || !socket.deliveryBoyId) {
           if (typeof ack === "function")
-            ack({ success: false, message: "Missing order ID or unauthorized" });
+            ack({
+              success: false,
+              message: "Missing order ID or unauthorized",
+            });
           return;
         }
 
-        const order = await Order.findById(orderId).select("assignedDeliveryBoy");
+        const order = await Order.findById(orderId).select(
+          "assignedDeliveryBoy",
+        );
         if (
           !order ||
           (order.assignedDeliveryBoy &&
@@ -420,10 +484,13 @@ export const initSocket = (httpServer) => {
 
         const room = `order:${orderId}`;
         socket.join(room);
-        console.log(`[Socket] Delivery Partner ${socket.deliveryBoyId} subscribed to ${room}`);
+        console.log(
+          `[Socket] Delivery Partner ${socket.deliveryBoyId} subscribed to ${room}`,
+        );
         if (typeof ack === "function") ack({ success: true, room });
       } catch (err) {
-        if (typeof ack === "function") ack({ success: false, message: err.message });
+        if (typeof ack === "function")
+          ack({ success: false, message: err.message });
       }
     });
 
@@ -434,7 +501,8 @@ export const initSocket = (httpServer) => {
         const now = Date.now();
         // Throttle updates: max 1 per 2 seconds
         if (now - lastCustomerLocationUpdate < 2000) {
-          if (typeof ack === "function") ack({ success: true, throttled: true });
+          if (typeof ack === "function")
+            ack({ success: true, throttled: true });
           return;
         }
         lastCustomerLocationUpdate = now;
@@ -442,7 +510,8 @@ export const initSocket = (httpServer) => {
         const lat = parseFloat(data?.latitude);
         const lng = parseFloat(data?.longitude);
         if (isNaN(lat) || isNaN(lng)) {
-          if (typeof ack === "function") ack({ success: false, message: "Invalid coordinates" });
+          if (typeof ack === "function")
+            ack({ success: false, message: "Invalid coordinates" });
           return;
         }
 
@@ -466,7 +535,9 @@ export const initSocket = (httpServer) => {
                 $expr: {
                   $lte: [
                     "$distanceMeters",
-                    { $multiply: [{ $ifNull: ["$deliveryRadiusKm", 5] }, 1000] },
+                    {
+                      $multiply: [{ $ifNull: ["$deliveryRadiusKm", 5] }, 1000],
+                    },
                   ],
                 },
               },
@@ -480,7 +551,9 @@ export const initSocket = (httpServer) => {
                 deliveryRadiusKm: 1,
                 isStoreOpen: 1,
                 distanceMeters: 1,
-                distanceKm: { $round: [{ $divide: ["$distanceMeters", 1000] }, 1] },
+                distanceKm: {
+                  $round: [{ $divide: ["$distanceMeters", 1000] }, 1],
+                },
               },
             },
           ]);
@@ -489,11 +562,18 @@ export const initSocket = (httpServer) => {
             status: { $in: ["approved", "active"] },
             isStoreOpen: { $ne: false },
           }).lean();
-          const { calculateDistanceKm } = await import("../utils/dispatchEngine.js");
+          const { calculateDistanceKm } =
+            await import("../utils/dispatchEngine.js");
           eligibleVendors = vendors
             .map((v) => {
-              const vLng = v.shippingLocations?.longitude || v.location?.coordinates?.[0] || 85.324;
-              const vLat = v.shippingLocations?.latitude || v.location?.coordinates?.[1] || 27.7172;
+              const vLng =
+                v.shippingLocations?.longitude ||
+                v.location?.coordinates?.[0] ||
+                85.324;
+              const vLat =
+                v.shippingLocations?.latitude ||
+                v.location?.coordinates?.[1] ||
+                27.7172;
               const dist = calculateDistanceKm(lat, lng, vLat, vLng);
               const radius = v.deliveryRadiusKm || 5;
               return { ...v, distanceKm: dist, isEligible: dist <= radius };
@@ -505,7 +585,10 @@ export const initSocket = (httpServer) => {
           count: eligibleVendors.length,
           vendors: eligibleVendors.map((v) => ({
             id: v._id,
-            name: v.businessDetails?.businessName || v.sellerDetails?.sellerName || "Store",
+            name:
+              v.businessDetails?.businessName ||
+              v.sellerDetails?.sellerName ||
+              "Store",
             distanceKm: v.distanceKm,
             deliveryRadiusKm: v.deliveryRadiusKm || 5,
           })),
@@ -517,7 +600,8 @@ export const initSocket = (httpServer) => {
         if (typeof ack === "function") ack({ success: true, ...payload });
       } catch (err) {
         console.error("[customer:location:update error]:", err);
-        if (typeof ack === "function") ack({ success: false, message: err.message });
+        if (typeof ack === "function")
+          ack({ success: false, message: err.message });
       }
     });
 
@@ -593,7 +677,9 @@ export const emitNewOrderToVendor = (vendorId, order) => {
   };
 
   io.to(storeRoom).emit("vendor:order:new", vendorPayload);
-  console.log(`[Socket Emitted] vendor:order:new sent to room: ${storeRoom} for Order: ${order.orderNumber}`);
+  console.log(
+    `[Socket Emitted] vendor:order:new sent to room: ${storeRoom} for Order: ${order.orderNumber}`,
+  );
 };
 
 /**
@@ -618,35 +704,50 @@ export const emitOrderStatusUpdate = (orderId, customerId, order) => {
   };
 
   // 1. Emit to order specific room (customer order details screen)
-  io.to(`order:${orderId}`).emit("customer:order:status_updated", updatePayload);
+  io.to(`order:${orderId}`).emit(
+    "customer:order:status_updated",
+    updatePayload,
+  );
 
   // 2. Emit to customer's personal room (customer home/orders list)
   if (customerId) {
-    io.to(`user:${customerId}`).emit("customer:order:status_updated", updatePayload);
+    io.to(`user:${customerId}`).emit(
+      "customer:order:status_updated",
+      updatePayload,
+    );
   }
 
   // 3. Emit to vendor's store room
   if (order.vendor) {
-    const vId = order.vendor._id ? order.vendor._id.toString() : order.vendor.toString();
+    const vId = order.vendor._id
+      ? order.vendor._id.toString()
+      : order.vendor.toString();
     io.to(`store:${vId}`).emit("vendor:order:status_updated", updatePayload);
   }
 
   console.log(
-    `[Socket Emitted] customer:order:status_updated for Order ${order.orderNumber} -> Status: ${order.orderStatus}`
+    `[Socket Emitted] customer:order:status_updated for Order ${order.orderNumber} -> Status: ${order.orderStatus}`,
   );
 };
 
 /**
  * Real-time notification helper: Emit event to a specific delivery partner room
  */
-export const emitToDeliveryPartner = (deliveryBoyId, event, data, userId = null) => {
+export const emitToDeliveryPartner = (
+  deliveryBoyId,
+  event,
+  data,
+  userId = null,
+) => {
   if (!io || !deliveryBoyId) return;
   const room = `delivery:${deliveryBoyId}`;
   io.to(room).emit(event, data);
   if (userId) {
     io.to(`user:${userId}`).emit(event, data);
   }
-  console.log(`[Socket Emitted] ${event} sent to ${room} (and user:${userId || "none"})`);
+  console.log(
+    `[Socket Emitted] ${event} sent to ${room} (and user:${userId || "none"})`,
+  );
 };
 
 /**
@@ -670,7 +771,7 @@ export const emitDeliveryPartnerStatus = (deliveryBoyId, statusData) => {
     updatedAt: new Date(),
   };
   io.emit("delivery:rider:status", payload);
-  console.log(`[Socket Emitted] delivery:rider:status for ${deliveryBoyId}:`, statusData);
+  // console.log(`[Socket Emitted] delivery:rider:status for ${deliveryBoyId}:`, statusData);
 };
 
 /**
@@ -718,7 +819,11 @@ export const emitVendorWalletUpdate = (vendorId, walletData) => {
 /**
  * Real-time notification helper: Broadcast vendor delivery radius update to all active customers
  */
-export const emitDeliveryRadiusUpdated = (vendorId, deliveryRadiusKm, storeName = "") => {
+export const emitDeliveryRadiusUpdated = (
+  vendorId,
+  deliveryRadiusKm,
+  storeName = "",
+) => {
   if (!io || !vendorId) return;
   const payload = {
     vendorId: vendorId.toString(),
@@ -727,13 +832,19 @@ export const emitDeliveryRadiusUpdated = (vendorId, deliveryRadiusKm, storeName 
     updatedAt: new Date(),
   };
   io.emit("vendor:delivery-radius:updated", payload);
-  console.log(`[Socket Emitted] vendor:delivery-radius:updated for vendor ${vendorId}: ${deliveryRadiusKm}km`);
+  console.log(
+    `[Socket Emitted] vendor:delivery-radius:updated for vendor ${vendorId}: ${deliveryRadiusKm}km`,
+  );
 };
 
 /**
  * Real-time notification helper: Broadcast vendor store open/close availability
  */
-export const emitVendorAvailabilityChanged = (vendorId, isStoreOpen, storeName = "") => {
+export const emitVendorAvailabilityChanged = (
+  vendorId,
+  isStoreOpen,
+  storeName = "",
+) => {
   if (!io || !vendorId) return;
   const payload = {
     vendorId: vendorId.toString(),
@@ -742,7 +853,9 @@ export const emitVendorAvailabilityChanged = (vendorId, isStoreOpen, storeName =
     updatedAt: new Date(),
   };
   io.emit("vendor:availability:changed", payload);
-  console.log(`[Socket Emitted] vendor:availability:changed for vendor ${vendorId}: isStoreOpen=${isStoreOpen}`);
+  console.log(
+    `[Socket Emitted] vendor:availability:changed for vendor ${vendorId}: isStoreOpen=${isStoreOpen}`,
+  );
 };
 
 /**
@@ -803,7 +916,9 @@ export const notifyStaffAdminsForVendor = async ({
         });
       }
     }
-    console.log(`[Staff Notification] ${eventType} dispatched for vendor ${vStr} to ${staffAdmins.length} staff admins`);
+    console.log(
+      `[Staff Notification] ${eventType} dispatched for vendor ${vStr} to ${staffAdmins.length} staff admins`,
+    );
   } catch (err) {
     console.error("[notifyStaffAdminsForVendor] Error:", err.message);
   }

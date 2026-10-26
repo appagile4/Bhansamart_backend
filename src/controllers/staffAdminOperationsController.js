@@ -102,6 +102,313 @@ export const getMyAssignedVendors = async (req, res, next) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 1.1 COMPLETE STAFFADMIN SCOPED DASHBOARD OVERVIEW & REAL-TIME STATS
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const getStaffDashboardOverview = async (req, res, next) => {
+  try {
+    const { isSuperAdmin, accessibleIds } = resolveStaffVendorScope(req);
+    const vendorId = req.query.vendorId;
+
+    let vendorFilter = null;
+    let vendorObjectIds = [];
+
+    if (vendorId && vendorId !== "all") {
+      assertVendorAccessible(req, vendorId);
+      vendorFilter = new mongoose.Types.ObjectId(vendorId);
+      vendorObjectIds = [vendorFilter];
+    } else if (!isSuperAdmin) {
+      vendorObjectIds = (accessibleIds || []).map(
+        (id) => new mongoose.Types.ObjectId(id)
+      );
+      vendorFilter = { $in: vendorObjectIds };
+    }
+
+    const { timeframe = "today", startDate, endDate } = req.query;
+
+    // Date range calculation
+    const now = new Date();
+    let filterStart = new Date();
+    let filterEnd = now;
+
+    if (startDate && endDate) {
+      filterStart = new Date(startDate);
+      filterEnd = new Date(endDate);
+      filterEnd.setHours(23, 59, 59, 999);
+    } else {
+      switch (timeframe) {
+        case "today":
+          filterStart.setHours(0, 0, 0, 0);
+          break;
+        case "yesterday":
+          filterStart.setDate(now.getDate() - 1);
+          filterStart.setHours(0, 0, 0, 0);
+          filterEnd = new Date(filterStart);
+          filterEnd.setHours(23, 59, 59, 999);
+          break;
+        case "7days":
+        case "last7days":
+          filterStart.setDate(now.getDate() - 7);
+          break;
+        case "30days":
+        case "last30days":
+          filterStart.setDate(now.getDate() - 30);
+          break;
+        case "thisMonth":
+          filterStart = new Date(now.getFullYear(), now.getMonth(), 1);
+          break;
+        default:
+          filterStart.setDate(now.getDate() - 7);
+      }
+    }
+
+    const scopedVendorQuery = vendorFilter ? { _id: vendorFilter } : {};
+    const scopedProductQuery = vendorFilter ? { vendor: vendorFilter } : {};
+    const scopedOrderQuery = {
+      ...(vendorFilter ? { vendor: vendorFilter } : {}),
+      createdAt: { $gte: filterStart, $lte: filterEnd },
+    };
+    const scopedAllOrdersQuery = vendorFilter ? { vendor: vendorFilter } : {};
+
+    // Parallel aggregate count lookups
+    const [
+      totalVendors,
+      activeVendors,
+      totalProducts,
+      activeProducts,
+      outOfStockProducts,
+      ordersAgg,
+      pendingRefundsCount,
+      pendingBrandsCount,
+      pendingWithdrawalsCount,
+      openTicketsCount,
+      activeDeliveriesCount,
+      dailyTrendsAgg,
+      recentOrders,
+      recentRefunds,
+    ] = await Promise.all([
+      Vendor.countDocuments({ ...scopedVendorQuery, status: { $ne: "deleted" } }),
+      Vendor.countDocuments({
+        ...scopedVendorQuery,
+        status: { $in: ["approved", "active"] },
+        isStoreOpen: true,
+      }),
+      Product.countDocuments(scopedProductQuery),
+      Product.countDocuments({ ...scopedProductQuery, status: "active", isActive: true }),
+      Product.countDocuments({ ...scopedProductQuery, stock: { $lte: 0 } }),
+
+      // Orders Aggregation in timeframe
+      Order.aggregate([
+        { $match: scopedOrderQuery },
+        {
+          $group: {
+            _id: null,
+            totalOrders: { $sum: 1 },
+            grossSales: { $sum: "$totalAmount" },
+            deliveredOrders: {
+              $sum: { $cond: [{ $eq: ["$orderStatus", "DELIVERED"] }, 1, 0] },
+            },
+            deliveredSales: {
+              $sum: {
+                $cond: [{ $eq: ["$orderStatus", "DELIVERED"] }, "$totalAmount", 0],
+              },
+            },
+            cancelledOrders: {
+              $sum: {
+                $cond: [{ $in: ["$orderStatus", ["CANCELLED", "REJECTED"]] }, 1, 0],
+              },
+            },
+            pendingOrders: {
+              $sum: {
+                $cond: [
+                  {
+                    $in: [
+                      "$orderStatus",
+                      [
+                        "PLACED",
+                        "ACCEPTED",
+                        "PREPARING",
+                        "READY_FOR_PICKUP",
+                        "OUT_FOR_DELIVERY",
+                      ],
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            codSales: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$orderStatus", "DELIVERED"] },
+                      { $eq: ["$paymentMethod", "Cash on delivery"] },
+                    ],
+                  },
+                  "$totalAmount",
+                  0,
+                ],
+              },
+            },
+            onlineSales: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$orderStatus", "DELIVERED"] },
+                      { $ne: ["$paymentMethod", "Cash on delivery"] },
+                    ],
+                  },
+                  "$totalAmount",
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]),
+
+      // Pending Queues (Action Items)
+      Refund.countDocuments({
+        ...(vendorFilter ? { vendor: vendorFilter } : {}),
+        status: { $in: ["PENDING", "UNDER_REVIEW", "STAFF_EXAMINATION_REQUIRED"] },
+      }),
+      Brand.countDocuments({
+        ...(vendorFilter ? { vendor: vendorFilter } : {}),
+        status: { $in: ["PENDING", "UNDER_REVIEW"] },
+      }),
+      VendorTransaction.countDocuments({
+        ...(vendorFilter ? { vendor: vendorFilter } : {}),
+        type: "WITHDRAWAL_REQUEST",
+        status: "PENDING",
+      }),
+      Ticket.countDocuments({
+        ...(vendorFilter ? { vendor: vendorFilter } : {}),
+        status: { $in: ["OPEN", "ASSIGNED", "IN_PROGRESS"] },
+      }),
+      DeliveryAssignment.countDocuments({
+        ...(vendorFilter ? { vendor: vendorFilter } : {}),
+        status: { $in: ["ASSIGNED", "ACCEPTED", "PICKED_UP", "IN_TRANSIT"] },
+      }),
+
+      // 7-day Daily Trends for Dashboard Chart
+      Order.aggregate([
+        {
+          $match: {
+            ...(vendorFilter ? { vendor: vendorFilter } : {}),
+            createdAt: {
+              $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+            },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+            },
+            sales: {
+              $sum: {
+                $cond: [{ $eq: ["$orderStatus", "DELIVERED"] }, "$totalAmount", 0],
+              },
+            },
+            ordersCount: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      // Recent 5 Orders
+      Order.find(scopedAllOrdersQuery)
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select(
+          "orderNumber totalAmount orderStatus paymentMethod paymentStatus createdAt vendor items"
+        )
+        .populate(
+          "vendor",
+          "businessDetails.businessName brandDetails.brandName sellerDetails.sellerName"
+        )
+        .lean(),
+
+      // Recent 5 Refunds awaiting review
+      Refund.find({
+        ...(vendorFilter ? { vendor: vendorFilter } : {}),
+        status: { $in: ["PENDING", "UNDER_REVIEW", "STAFF_EXAMINATION_REQUIRED"] },
+      })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select("refundNumber reason amount status createdAt vendor order")
+        .populate("vendor", "businessDetails.businessName")
+        .populate("order", "orderNumber totalAmount")
+        .lean(),
+    ]);
+
+    const orderStats = ordersAgg[0] || {
+      totalOrders: 0,
+      grossSales: 0,
+      deliveredOrders: 0,
+      deliveredSales: 0,
+      cancelledOrders: 0,
+      pendingOrders: 0,
+      codSales: 0,
+      onlineSales: 0,
+    };
+
+    res.status(200).json({
+      success: true,
+      data: {
+        kpi: {
+          totalVendors,
+          activeVendors,
+          inactiveVendors: Math.max(0, totalVendors - activeVendors),
+          totalProducts,
+          activeProducts,
+          outOfStockProducts,
+          totalOrders: orderStats.totalOrders,
+          grossSales: orderStats.grossSales,
+          deliveredSales: orderStats.deliveredSales,
+          codSales: orderStats.codSales,
+          onlineSales: orderStats.onlineSales,
+          pendingOrders: orderStats.pendingOrders,
+          deliveredOrders: orderStats.deliveredOrders,
+          cancelledOrders: orderStats.cancelledOrders,
+        },
+        pendingTasks: {
+          pendingRefunds: pendingRefundsCount,
+          pendingBrands: pendingBrandsCount,
+          pendingWithdrawals: pendingWithdrawalsCount,
+          openTickets: openTicketsCount,
+          activeDeliveries: activeDeliveriesCount,
+          totalPendingTasks:
+            pendingRefundsCount +
+            pendingBrandsCount +
+            pendingWithdrawalsCount +
+            openTicketsCount,
+        },
+        dailyTrends: dailyTrendsAgg,
+        recentOrders: recentOrders.map((o) => ({
+          ...o,
+          vendorName:
+            o.vendor?.businessDetails?.businessName ||
+            o.vendor?.brandDetails?.brandName ||
+            o.vendor?.sellerDetails?.sellerName ||
+            "Assigned Store",
+        })),
+        recentRefunds: recentRefunds.map((r) => ({
+          ...r,
+          vendorName: r.vendor?.businessDetails?.businessName || "Assigned Store",
+          orderNumber: r.order?.orderNumber || "N/A",
+        })),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 2. COMPLETE VENDOR SALES AND PRODUCT ANALYTICS
 // ═══════════════════════════════════════════════════════════════════════════
 

@@ -32,6 +32,7 @@ import {
 } from "../controllers/adminManagementController.js";
 import {
   getMyAssignedVendors,
+  getStaffDashboardOverview,
   getVendorSalesAnalytics,
   getVendorProductsAnalytics,
   getDeliveryAssignmentsAdmin,
@@ -120,6 +121,7 @@ router.put("/platform-payment/config", requireSuperadminOnly, updatePlatformPaym
 router.get("/audit-logs", requireSuperadminOnly, getAuditLogsAdmin);
 
 // ── 13. StaffAdmin Operations, Vendor Management & Refund Workflow ──
+router.get("/staff-operations/dashboard-overview", getStaffDashboardOverview);
 router.get("/staff-operations/assigned-vendors", getMyAssignedVendors);
 
 // Sales & Product Analytics (supports query param ?vendorId=... or path param :vendorId)
