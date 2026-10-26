@@ -11,6 +11,7 @@ import CodHandover from "../models/CodHandover.js";
 import VendorTransaction from "../models/VendorTransaction.js";
 import Notification from "../models/Notification.js";
 import AuditLog from "../models/AuditLog.js";
+import Ticket from "../models/Ticket.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import { notifyStaffAdminsForVendor } from "../socket/socketManager.js";
 import { processOrderRefund } from "../services/financeLedgerService.js";
@@ -21,10 +22,10 @@ import { processOrderRefund } from "../services/financeLedgerService.js";
  * StaffAdmin gets array of assigned Vendor ObjectIds.
  */
 export const resolveStaffVendorScope = (req) => {
-  if (req.user.role === "superadmin") {
+  if (req.user?.role === "superadmin") {
     return { isSuperAdmin: true, accessibleIds: null };
   }
-  const assigned = (req.user.assignedVendors || []).map((v) =>
+  const assigned = (req.user?.assignedVendors || []).map((v) =>
     (v._id || v).toString()
   );
   return { isSuperAdmin: false, accessibleIds: assigned };
@@ -56,7 +57,10 @@ export const getMyAssignedVendors = async (req, res, next) => {
     const query = { status: { $ne: "deleted" } };
 
     if (!isSuperAdmin) {
-      query._id = { $in: accessibleIds.map((id) => new mongoose.Types.ObjectId(id)) };
+      const validIds = (accessibleIds || [])
+        .filter((id) => id && mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+      query._id = { $in: validIds };
     }
 
     const vendors = await Vendor.find(query)
@@ -118,9 +122,9 @@ export const getStaffDashboardOverview = async (req, res, next) => {
       vendorFilter = new mongoose.Types.ObjectId(vendorId);
       vendorObjectIds = [vendorFilter];
     } else if (!isSuperAdmin) {
-      vendorObjectIds = (accessibleIds || []).map(
-        (id) => new mongoose.Types.ObjectId(id)
-      );
+      vendorObjectIds = (accessibleIds || [])
+        .filter((id) => id && mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
       vendorFilter = { $in: vendorObjectIds };
     }
 
@@ -401,6 +405,66 @@ export const getStaffDashboardOverview = async (req, res, next) => {
           vendorName: r.vendor?.businessDetails?.businessName || "Assigned Store",
           orderNumber: r.order?.orderNumber || "N/A",
         })),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1.2 COMPLETE STAFFADMIN SCOPED ORDERS LISTING
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const getStaffOrders = async (req, res, next) => {
+  try {
+    const { isSuperAdmin, accessibleIds } = resolveStaffVendorScope(req);
+    const { vendorId, status, search, page = 1, limit = 50 } = req.query;
+
+    let vendorFilter = null;
+    if (vendorId && vendorId !== "all") {
+      assertVendorAccessible(req, vendorId);
+      vendorFilter = new mongoose.Types.ObjectId(vendorId);
+    } else if (!isSuperAdmin) {
+      const validIds = (accessibleIds || [])
+        .filter((id) => id && mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+      vendorFilter = { $in: validIds };
+    }
+
+    const query = vendorFilter ? { vendor: vendorFilter } : {};
+
+    if (status && status !== "ALL") {
+      query.orderStatus = status;
+    }
+
+    if (search) {
+      query.orderNumber = { $regex: search.trim(), $options: "i" };
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    const skip = (pageNum - 1) * limitNum;
+
+    const [orders, total] = await Promise.all([
+      Order.find(query)
+        .populate("vendor", "businessDetails.businessName name")
+        .populate("customer", "name phone email")
+        .populate("assignedDeliveryBoy", "fullName phone")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Order.countDocuments(query),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        orders,
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / limitNum),
       },
     });
   } catch (error) {

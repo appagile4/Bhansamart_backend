@@ -23,14 +23,20 @@ export const enforceAdminVendorScope = (req, res, next) => {
     req.accessibleVendorIds = assigned;
 
     // If query/params specifies a vendorId, verify admin has been explicitly assigned to it
+    const body = req.body || {};
+    const query = req.query || {};
+    const params = req.params || {};
+
     const targetVendorId =
-      req.params.vendorId ||
-      req.params.id ||
-      req.query.vendorId ||
-      req.body.vendorId;
+      params.vendorId ||
+      params.id ||
+      query.vendorId ||
+      body.vendorId;
 
     if (
       targetVendorId &&
+      req.baseUrl &&
+      typeof req.baseUrl === "string" &&
       req.baseUrl.includes("/vendors") &&
       req.method !== "GET" &&
       !assigned.includes(targetVendorId.toString())

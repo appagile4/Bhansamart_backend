@@ -33,6 +33,7 @@ import {
 import {
   getMyAssignedVendors,
   getStaffDashboardOverview,
+  getStaffOrders,
   getVendorSalesAnalytics,
   getVendorProductsAnalytics,
   getDeliveryAssignmentsAdmin,
@@ -123,6 +124,7 @@ router.get("/audit-logs", requireSuperadminOnly, getAuditLogsAdmin);
 // ── 13. StaffAdmin Operations, Vendor Management & Refund Workflow ──
 router.get("/staff-operations/dashboard-overview", getStaffDashboardOverview);
 router.get("/staff-operations/assigned-vendors", getMyAssignedVendors);
+router.get("/staff-operations/orders", getStaffOrders);
 
 // Sales & Product Analytics (supports query param ?vendorId=... or path param :vendorId)
 router.get("/staff-operations/sales-analytics", getVendorSalesAnalytics);
