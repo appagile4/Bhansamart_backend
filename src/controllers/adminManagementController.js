@@ -15,7 +15,7 @@ import VendorNotification from "../models/VendorNotification.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import { FINANCE_CONFIG, calculateCommission } from "../config/financeConfig.js";
 import { logAdminAction } from "../services/auditService.js";
-import { getIO, emitVendorNotification } from "../socket/socketManager.js";
+import { getIO, emitVendorNotification, emitToDeliveryPartner } from "../socket/socketManager.js";
 import { uploadCategoryImageToCloudinary } from "../utils/cloudinaryUpload.js";
 
 // Helper to build date range from timeframe filter
@@ -2031,44 +2031,455 @@ export const replyToTicketAdmin = async (req, res, next) => {
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
- * 10. TARGETED NOTIFICATION COMPOSER
+ * 10. TARGETED NOTIFICATION COMPOSER (SUPERADMIN & AUTHORIZED STAFF)
  * ─────────────────────────────────────────────────────────────────────────────
  */
+export const searchNotificationRecipientsAdmin = async (req, res, next) => {
+  try {
+    const { role = "customer", q = "" } = req.query;
+    const query = String(q).trim();
+    const regex = query ? new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") : null;
+
+    let results = [];
+
+    if (role === "customer" || role === "user") {
+      const filter = { role: { $in: ["customer", "user"] } };
+      if (regex) {
+        filter.$or = [{ name: regex }, { phone: regex }, { email: regex }];
+      }
+      const users = await User.find(filter)
+        .select("name phone email role avatar")
+        .limit(25)
+        .lean();
+      results = users.map((u) => ({
+        id: u._id.toString(),
+        name: u.name || "Customer",
+        phone: u.phone || "",
+        email: u.email || "",
+        role: "customer",
+        avatar: u.avatar || "",
+      }));
+    } else if (role === "vendor") {
+      const filter = {};
+      if (regex) {
+        filter.$or = [
+          { "businessDetails.businessName": regex },
+          { "sellerDetails.sellerPhone": regex },
+          { "sellerDetails.sellerName": regex },
+        ];
+      }
+      const vendors = await Vendor.find(filter)
+        .select("businessDetails.businessName brandDetails.brandLogo sellerDetails isStoreOpen")
+        .limit(25)
+        .lean();
+      results = vendors.map((v) => ({
+        id: v._id.toString(),
+        name: v.businessDetails?.businessName || v.sellerDetails?.sellerName || "Store",
+        phone: v.sellerDetails?.sellerPhone || "",
+        email: v.sellerDetails?.sellerEmail || "",
+        role: "vendor",
+        avatar: v.brandDetails?.brandLogo || "",
+        isStoreOpen: v.isStoreOpen,
+      }));
+    } else if (role === "delivery_boy" || role === "delivery") {
+      const filter = {};
+      if (regex) {
+        filter.$or = [{ fullName: regex }, { phone: regex }, { email: regex }];
+      }
+      const riders = await DeliveryBoy.find(filter)
+        .select("fullName phone email profilePhoto availability user")
+        .limit(25)
+        .lean();
+      results = riders.map((r) => ({
+        id: r._id.toString(),
+        userId: r.user?.toString() || "",
+        name: r.fullName || "Delivery Partner",
+        phone: r.phone || "",
+        email: r.email || "",
+        role: "delivery_boy",
+        avatar: r.profilePhoto?.url || "",
+        availability: r.availability,
+      }));
+    } else if (role === "admin" || role === "staff") {
+      const filter = { role: "admin" };
+      if (regex) {
+        filter.$or = [{ name: regex }, { phone: regex }, { email: regex }];
+      }
+      const admins = await User.find(filter)
+        .select("name phone email role")
+        .limit(25)
+        .lean();
+      results = admins.map((a) => ({
+        id: a._id.toString(),
+        name: a.name || "Staff Admin",
+        phone: a.phone || "",
+        email: a.email || "",
+        role: "admin",
+      }));
+    }
+
+    res.status(200).json({
+      success: true,
+      data: results,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const sendTargetedNotificationAdmin = async (req, res, next) => {
   try {
     const {
       title,
       body,
-      targetAudience, // "all_customers", "all_vendors", "all_delivery", "specific_customer", "specific_vendor"
+      targetAudience, // "ALL", "CUSTOMERS", "VENDORS", "DELIVERY_BOYS", "ADMIN_STAFF", "SPECIFIC", or legacy
+      targetRole, // "customer" | "vendor" | "delivery_boy" | "admin"
       targetId,
       deepLink = "",
+      data = {},
     } = req.body;
 
     if (!title || !body) {
       return next(new AppError("Notification title and body are required", 400));
     }
 
+    const isSuperAdmin = req.user.role === "superadmin";
+    if (!isSuperAdmin) {
+      if (req.user.adminPermissions?.canSendNotifications === false) {
+        return next(new AppError("You do not have permission to send notifications", 403));
+      }
+      if (["ALL", "ADMIN_STAFF", "all"].includes(targetAudience)) {
+        return next(new AppError("Only Super Admin can broadcast to all users or admin staff", 403));
+      }
+    }
+
     const io = getIO();
     let recipientCount = 0;
+    const normAudience = (targetAudience || "").toUpperCase();
 
-    if (targetAudience === "all_customers") {
-      const customers = await User.find({ role: "customer" }).select("_id").lean();
+    const notifData = {
+      ...(typeof data === "object" ? data : {}),
+      deepLink: deepLink || "",
+      sentBy: req.user._id,
+      senderRole: req.user.role,
+      senderName: req.user.name || "Super Admin",
+    };
+
+    const batchInsertNotifications = async (docs) => {
+      if (!docs || !docs.length) return;
+      const CHUNK = 500;
+      for (let i = 0; i < docs.length; i += CHUNK) {
+        await Notification.insertMany(docs.slice(i, i + CHUNK), { ordered: false }).catch(() => {});
+      }
+    };
+
+    const batchInsertVendorNotifications = async (docs) => {
+      if (!docs || !docs.length) return;
+      const CHUNK = 500;
+      for (let i = 0; i < docs.length; i += CHUNK) {
+        await VendorNotification.insertMany(docs.slice(i, i + CHUNK), { ordered: false }).catch(() => {});
+      }
+    };
+
+    // ─────────────────────────────────────────────────────────────
+    // CASE 1: EVERYONE / ALL APP USERS ("ALL")
+    // ─────────────────────────────────────────────────────────────
+    if (normAudience === "ALL" || normAudience === "ALL_USERS") {
+      const [customers, vendors, riders, staff] = await Promise.all([
+        User.find({ role: { $in: ["customer", "user"] }, isActive: { $ne: false } }).select("_id").lean(),
+        Vendor.find({ $or: [{ status: { $in: ["approved", "active"] } }, { "businessDetails.verificationStatus": "approved" }] }).select("_id").lean(),
+        DeliveryBoy.find().select("user _id").lean(),
+        User.find({ role: "admin", isActive: { $ne: false } }).select("_id").lean(),
+      ]);
+
+      const customerDocs = customers.map((c) => ({
+        user: c._id,
+        title: title.trim(),
+        message: body.trim(),
+        type: "broadcast",
+        data: notifData,
+        isRead: false,
+      }));
+
+      const vendorDocs = vendors.map((v) => ({
+        vendor: v._id,
+        title: title.trim(),
+        message: body.trim(),
+        type: "ANNOUNCEMENT",
+        data: notifData,
+        isRead: false,
+      }));
+
+      const riderUserIds = new Set();
+      riders.forEach((r) => {
+        if (r.user) riderUserIds.add(r.user.toString());
+      });
+      const riderDocs = Array.from(riderUserIds).map((uId) => ({
+        user: uId,
+        title: title.trim(),
+        message: body.trim(),
+        type: "broadcast",
+        data: notifData,
+        isRead: false,
+      }));
+
+      const staffDocs = staff.map((s) => ({
+        user: s._id,
+        title: title.trim(),
+        message: body.trim(),
+        type: "staff_alert",
+        data: notifData,
+        isRead: false,
+      }));
+
+      await Promise.all([
+        batchInsertNotifications([...customerDocs, ...riderDocs, ...staffDocs]),
+        batchInsertVendorNotifications(vendorDocs),
+      ]);
+
+      recipientCount = customers.length + vendors.length + riderUserIds.size + staff.length;
+
+      if (io) {
+        io.emit("notification:broadcast", { title, body, deepLink, data: notifData });
+        io.emit("vendor:notification:broadcast", { title, body, deepLink, data: notifData });
+        io.emit("delivery:notification:broadcast", { title, body, deepLink, data: notifData });
+        io.to("role:admin").emit("staff:notification", {
+          title,
+          message: body,
+          eventType: "staff_alert",
+          data: notifData,
+        });
+      }
+    }
+    // ─────────────────────────────────────────────────────────────
+    // CASE 2: CUSTOMERS ONLY ("CUSTOMERS" / "ALL_CUSTOMERS")
+    // ─────────────────────────────────────────────────────────────
+    else if (normAudience === "CUSTOMERS" || normAudience === "ALL_CUSTOMERS") {
+      const customers = await User.find({ role: { $in: ["customer", "user"] }, isActive: { $ne: false } }).select("_id").lean();
       recipientCount = customers.length;
-      if (io) io.emit("notification:broadcast", { title, body, deepLink });
-    } else if (targetAudience === "all_vendors") {
+
+      const customerDocs = customers.map((c) => ({
+        user: c._id,
+        title: title.trim(),
+        message: body.trim(),
+        type: "broadcast",
+        data: notifData,
+        isRead: false,
+      }));
+      await batchInsertNotifications(customerDocs);
+
+      if (io) io.emit("notification:broadcast", { title, body, deepLink, data: notifData });
+    }
+    // ─────────────────────────────────────────────────────────────
+    // CASE 3: VENDORS ONLY ("VENDORS" / "ALL_VENDORS")
+    // ─────────────────────────────────────────────────────────────
+    else if (normAudience === "VENDORS" || normAudience === "ALL_VENDORS") {
       const vendors = await Vendor.find().select("_id").lean();
       recipientCount = vendors.length;
-      if (io) io.emit("vendor:notification:broadcast", { title, body, deepLink });
-    } else if (targetAudience === "specific_customer" && targetId) {
-      recipientCount = 1;
-      if (io) io.to(`user:${targetId}`).emit("notification:direct", { title, body, deepLink });
-    } else if (targetAudience === "specific_vendor" && targetId) {
-      recipientCount = 1;
-      emitVendorNotification(targetId.toString(), {
-        title,
-        message: body,
-        type: "SYSTEM_ALERT",
+
+      const vendorDocs = vendors.map((v) => ({
+        vendor: v._id,
+        title: title.trim(),
+        message: body.trim(),
+        type: "ANNOUNCEMENT",
+        data: notifData,
+        isRead: false,
+      }));
+      await batchInsertVendorNotifications(vendorDocs);
+
+      if (io) {
+        io.emit("vendor:notification:broadcast", { title, body, deepLink, data: notifData });
+        vendors.forEach((v) => {
+          emitVendorNotification(v._id.toString(), {
+            title,
+            message: body,
+            type: "ANNOUNCEMENT",
+            data: notifData,
+          });
+        });
+      }
+    }
+    // ─────────────────────────────────────────────────────────────
+    // CASE 4: DELIVERY BOYS ONLY ("DELIVERY_BOYS" / "ALL_DELIVERY")
+    // ─────────────────────────────────────────────────────────────
+    else if (
+      normAudience === "DELIVERY_BOYS" ||
+      normAudience === "ALL_DELIVERY" ||
+      normAudience === "ALL_DELIVERY_BOYS"
+    ) {
+      const riders = await DeliveryBoy.find().select("user _id").lean();
+      const riderUserIds = new Set();
+      riders.forEach((r) => {
+        if (r.user) riderUserIds.add(r.user.toString());
       });
+
+      const riderUsers = await User.find({ role: "delivery_boy", isActive: { $ne: false } }).select("_id").lean();
+      riderUsers.forEach((u) => riderUserIds.add(u._id.toString()));
+
+      recipientCount = riderUserIds.size;
+
+      const riderDocs = Array.from(riderUserIds).map((uId) => ({
+        user: uId,
+        title: title.trim(),
+        message: body.trim(),
+        type: "broadcast",
+        data: notifData,
+        isRead: false,
+      }));
+      await batchInsertNotifications(riderDocs);
+
+      if (io) {
+        io.emit("delivery:notification:broadcast", { title, body, deepLink, data: notifData });
+        riders.forEach((r) => {
+          if (r._id) {
+            emitToDeliveryPartner(r._id.toString(), "delivery:notification", { title, message: body, data: notifData }, r.user?.toString());
+          }
+        });
+      }
+    }
+    // ─────────────────────────────────────────────────────────────
+    // CASE 5: ADMIN STAFF ONLY ("ADMIN_STAFF" / "ALL_ADMINS")
+    // ─────────────────────────────────────────────────────────────
+    else if (normAudience === "ADMIN_STAFF" || normAudience === "ALL_ADMIN_STAFF" || normAudience === "ALL_ADMINS") {
+      const staff = await User.find({ role: "admin", isActive: { $ne: false } }).select("_id").lean();
+      recipientCount = staff.length;
+
+      const staffDocs = staff.map((s) => ({
+        user: s._id,
+        title: title.trim(),
+        message: body.trim(),
+        type: "staff_alert",
+        data: notifData,
+        isRead: false,
+      }));
+      await batchInsertNotifications(staffDocs);
+
+      if (io) {
+        io.to("role:admin").emit("staff:notification", {
+          title,
+          message: body,
+          eventType: "staff_alert",
+          data: notifData,
+        });
+      }
+    }
+    // ─────────────────────────────────────────────────────────────
+    // CASE 6: SPECIFIC TARGET ("SPECIFIC" or legacy specific_*)
+    // ─────────────────────────────────────────────────────────────
+    else if (
+      normAudience === "SPECIFIC" ||
+      normAudience === "SPECIFIC_USER" ||
+      targetAudience === "specific_customer" ||
+      targetAudience === "specific_vendor" ||
+      targetAudience === "specific_delivery" ||
+      targetAudience === "specific_admin"
+    ) {
+      if (!targetId) {
+        return next(new AppError("Target recipient ID is required for specific targeting", 400));
+      }
+
+      let resolvedRole = targetRole;
+      if (!resolvedRole) {
+        if (targetAudience === "specific_customer") resolvedRole = "customer";
+        else if (targetAudience === "specific_vendor") resolvedRole = "vendor";
+        else if (targetAudience === "specific_delivery") resolvedRole = "delivery_boy";
+        else if (targetAudience === "specific_admin") resolvedRole = "admin";
+      }
+
+      if (resolvedRole === "vendor") {
+        const vendor = await Vendor.findById(targetId);
+        if (!vendor) return next(new AppError("Vendor not found", 404));
+
+        await VendorNotification.create({
+          vendor: vendor._id,
+          title: title.trim(),
+          message: body.trim(),
+          type: "ANNOUNCEMENT",
+          data: notifData,
+        });
+
+        if (vendor.userId) {
+          await Notification.create({
+            user: vendor.userId,
+            title: title.trim(),
+            message: body.trim(),
+            type: "announcement",
+            data: notifData,
+          }).catch(() => {});
+        }
+
+        emitVendorNotification(vendor._id.toString(), {
+          title: title.trim(),
+          message: body.trim(),
+          type: "ANNOUNCEMENT",
+          data: notifData,
+        });
+        recipientCount = 1;
+      } else if (resolvedRole === "delivery_boy" || resolvedRole === "delivery") {
+        const rider = (await DeliveryBoy.findById(targetId).populate("user")) || (await DeliveryBoy.findOne({ user: targetId }));
+        const targetUserId = rider?.user?._id || rider?.user || targetId;
+
+        await Notification.create({
+          user: targetUserId,
+          title: title.trim(),
+          message: body.trim(),
+          type: "broadcast",
+          data: notifData,
+        });
+
+        if (rider?._id) {
+          emitToDeliveryPartner(rider._id.toString(), "delivery:notification", { title, message: body, data: notifData }, targetUserId.toString());
+        }
+        if (io) {
+          io.to(`user:${targetUserId.toString()}`).emit("delivery:notification", { title, message: body, data: notifData });
+        }
+        recipientCount = 1;
+      } else if (resolvedRole === "admin" || resolvedRole === "staff") {
+        const adminUser = await User.findById(targetId);
+        if (!adminUser) return next(new AppError("Staff Admin not found", 404));
+
+        await Notification.create({
+          user: adminUser._id,
+          title: title.trim(),
+          message: body.trim(),
+          type: "staff_alert",
+          data: notifData,
+        });
+
+        if (io) {
+          io.to(`user:${adminUser._id.toString()}`).emit("staff:notification", {
+            title,
+            message: body,
+            eventType: "staff_alert",
+            data: notifData,
+          });
+        }
+        recipientCount = 1;
+      } else {
+        // Customer or default User
+        const customer = await User.findById(targetId);
+        if (!customer) return next(new AppError("Customer not found", 404));
+
+        await Notification.create({
+          user: customer._id,
+          title: title.trim(),
+          message: body.trim(),
+          type: "broadcast",
+          data: notifData,
+        });
+
+        if (io) {
+          io.to(`user:${customer._id.toString()}`).emit("notification:direct", {
+            title,
+            body,
+            deepLink,
+            data: notifData,
+          });
+        }
+        recipientCount = 1;
+      }
+    } else {
+      return next(new AppError(`Invalid target audience: ${targetAudience}`, 400));
     }
 
     await logAdminAction({

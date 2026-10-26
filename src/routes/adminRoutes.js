@@ -27,6 +27,7 @@ import {
   getTicketDetailsAdmin,
   replyToTicketAdmin,
   sendTargetedNotificationAdmin,
+  searchNotificationRecipientsAdmin,
   getLiveOperationalMapData,
   getAuditLogsAdmin,
 } from "../controllers/adminManagementController.js";
@@ -52,6 +53,13 @@ import {
   getStaffNotificationsAdmin,
   markStaffNotificationRead,
 } from "../controllers/staffAdminOperationsController.js";
+import {
+  getBroadcastPermissions,
+  getBroadcastEligibleVendors,
+  getBroadcastRecipientPreview,
+  sendVendorBroadcast,
+  getBroadcastHistory,
+} from "../controllers/vendorBroadcastController.js";
 import { protect, authorizeRoles } from "../middleware/authMiddleware.js";
 import {
   enforceAdminVendorScope,
@@ -105,6 +113,14 @@ router.post("/tickets/:id/reply", replyToTicketAdmin);
 
 // 8. Targeted Notifications
 router.post("/notifications/send", sendTargetedNotificationAdmin);
+router.get("/notifications/search-recipients", searchNotificationRecipientsAdmin);
+
+// 8.1 Vendor Broadcast Notifications (Staff & Super Admin with Granular RBAC)
+router.get("/broadcasts/permissions", getBroadcastPermissions);
+router.get("/broadcasts/eligible-vendors", getBroadcastEligibleVendors);
+router.get("/broadcasts/recipient-preview", getBroadcastRecipientPreview);
+router.post("/broadcasts/send", sendVendorBroadcast);
+router.get("/broadcasts/history", getBroadcastHistory);
 
 // 9. Live Operational Map
 router.get("/map/live-data", getLiveOperationalMapData);

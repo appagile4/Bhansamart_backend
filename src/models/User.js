@@ -115,6 +115,10 @@ const userSchema = new mongoose.Schema(
       canExamineRefunds: { type: Boolean, default: true },
       canReconcileCod: { type: Boolean, default: true },
       canTrackDeliveries: { type: Boolean, default: true },
+      // Vendor Broadcast Targeting Permissions (Super Admin managed)
+      canBroadcastToAssignedVendors: { type: Boolean, default: false },
+      canBroadcastToSpecificVendors: { type: Boolean, default: false },
+      canBroadcastToAllVendors: { type: Boolean, default: false },
     },
 
     // OTP for Login / Verification

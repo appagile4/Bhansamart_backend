@@ -36,6 +36,8 @@ const notificationSchema = new mongoose.Schema(
         "staff_cod",
         "staff_ticket",
         "staff_alert",
+        "announcement",
+        "broadcast",
       ],
       default: "system",
       index: true,
