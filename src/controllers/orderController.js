@@ -6,6 +6,7 @@ import Address from "../models/Address.js";
 import DeliveryAssignment from "../models/DeliveryAssignment.js";
 import VendorNotification from "../models/VendorNotification.js";
 import Refund from "../models/Refund.js";
+import { sendPushToUsers, sendPushToVendors } from "../services/pushNotificationService.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
   emitNewOrderToVendor,
@@ -276,6 +277,35 @@ export const createOrder = async (req, res, next) => {
       },
     });
     emitVendorNotification(vendor._id.toString(), vendorNotif);
+
+    // Dispatch Push Notification to Vendor & Customer
+    sendPushToVendors({
+      vendorIds: [vendor._id],
+      title: "New Incoming Order! 🛍️",
+      body: `Order #${newOrder.orderNumber} received for NPR ${newOrder.totalAmount}.`,
+      data: {
+        orderId: newOrder._id.toString(),
+        orderNumber: newOrder.orderNumber,
+        screen: "OrderDetailsScreen",
+        type: "ORDER_NEW",
+      },
+      channelId: "orders",
+      sound: "default",
+      priority: "high",
+    }).catch(() => {});
+
+    sendPushToUsers({
+      userIds: [customerId],
+      title: "Order Placed Successfully! 🎉",
+      body: `Your order #${newOrder.orderNumber} has been received and sent to the store.`,
+      data: {
+        orderId: newOrder._id.toString(),
+        orderNumber: newOrder.orderNumber,
+        screen: "OrderTrackingScreen",
+        type: "ORDER_CREATED",
+      },
+      channelId: "orders",
+    }).catch(() => {});
 
     // Emit to customer's personal channel
     emitOrderStatusUpdate(
@@ -670,6 +700,32 @@ export const updateOrderStatus = async (req, res, next) => {
         },
       });
       emitVendorNotification(vId.toString(), vendorNotif);
+      const custId = updatedOrder.customer?._id || updatedOrder.customer;
+      if (custId) {
+        const customerMsgMap = {
+          ACCEPTED: "Your order has been confirmed by the store and is being prepared.",
+          PREPARING: "Your order is currently being prepared by the store.",
+          READY_FOR_PICKUP: "Your order is ready and waiting for delivery partner pickup.",
+          OUT_FOR_DELIVERY: "Your order is out for delivery with our rider! 🛵",
+          DELIVERED: "Your order has been successfully delivered. Enjoy! 📦",
+          CANCELLED: `Your order was cancelled.${reason ? " Reason: " + reason : ""}`,
+          REJECTED: `Your order could not be accepted.${reason ? " Reason: " + reason : ""}`,
+        };
+        const pushBody = customerMsgMap[status] || `Your order status changed to ${status}.`;
+        sendPushToUsers({
+          userIds: [custId],
+          title: `Order #${updatedOrder.orderNumber}: ${status.replace(/_/g, " ")}`,
+          body: pushBody,
+          data: {
+            orderId: updatedOrder._id.toString(),
+            orderNumber: updatedOrder.orderNumber,
+            orderStatus: status,
+            screen: "OrderTrackingScreen",
+            type: "ORDER_STATUS_CHANGED",
+          },
+          channelId: "orders",
+        }).catch(() => {});
+      }
     }
 
     // If order is accepted or ready for pickup, automatically dispatch to nearest available delivery partner

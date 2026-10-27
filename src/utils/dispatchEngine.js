@@ -6,6 +6,7 @@ import DeliveryAssignment from "../models/DeliveryAssignment.js";
 import Order from "../models/Order.js";
 import Vendor from "../models/Vendor.js";
 import { emitToDeliveryPartner, emitToOrderRoom } from "../socket/socketManager.js";
+import { sendPushToDeliveryPartners } from "../services/pushNotificationService.js";
 
 /**
  * Generate a cryptographically secure 4-digit OTP
@@ -272,6 +273,20 @@ export const dispatchOrderToNearestPartner = async (orderId) => {
       offerPayload,
       candidate.user?.toString()
     );
+
+    sendPushToDeliveryPartners({
+      deliveryBoyIds: [candidate._id],
+      title: "New Delivery Offer Nearby! 🛵",
+      body: `Order #${order.orderNumber} is ready for delivery. Est. Earnings: NPR ${assignment.estimatedEarnings || 60}.`,
+      data: {
+        orderId: order._id.toString(),
+        assignmentId: assignment._id.toString(),
+        screen: "DeliveryTaskScreen",
+        type: "DELIVERY_OFFER",
+      },
+      channelId: "delivery",
+      priority: "high",
+    }).catch(() => {});
     console.log(
       `[Dispatch] Offered Order ${order.orderNumber} to Nearest Delivery Partner ${candidate.fullName} (${candidate._id}, ${distanceToStore} km away). Timeout in ${timeoutSeconds}s.`
     );

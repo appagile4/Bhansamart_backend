@@ -6,6 +6,7 @@ import Vendor from "../models/Vendor.js";
 import VendorTransaction from "../models/VendorTransaction.js";
 import VendorNotification from "../models/VendorNotification.js";
 import DeliveryEarningsLedger from "../models/DeliveryEarningsLedger.js";
+import { sendPushToUsers, sendPushToVendors } from "../services/pushNotificationService.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
   recordCodDoorstepCollection,
@@ -378,7 +379,19 @@ export const verifyPickupOtp = async (req, res, next) => {
       orderStatus: "OUT_FOR_DELIVERY",
     });
 
-    // Persistent vendor notification
+    sendPushToUsers({
+      userIds: [order.customer?._id || order.customer],
+      title: "Order Picked Up! 🛵",
+      body: `Your order #${order.orderNumber} has been collected by ${deliveryBoy.fullName} and is on its way to you.`,
+      data: {
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber,
+        screen: "OrderTrackingScreen",
+        type: "OUT_FOR_DELIVERY",
+      },
+      channelId: "orders",
+    }).catch(() => {});
+
     if (order.vendor) {
       const vId = order.vendor._id || order.vendor;
       const vendorNotif = await VendorNotification.create({

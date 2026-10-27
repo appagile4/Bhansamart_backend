@@ -6,6 +6,7 @@ import VendorBroadcast from "../models/VendorBroadcast.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import { logAdminAction } from "../services/auditService.js";
 import { emitVendorNotification } from "../socket/socketManager.js";
+import { sendPushToVendors } from "../services/pushNotificationService.js";
 
 /**
  * Helper: Resolve and check StaffAdmin's broadcast permissions against DB
@@ -516,6 +517,20 @@ export const sendVendorBroadcast = async (req, res, next) => {
     recipientVendorIds.forEach((vId) => {
       emitVendorNotification(vId.toString(), socketPayload);
     });
+
+    // 7.1 Real-Time OS Push Notifications to Vendor Devices
+    sendPushToVendors({
+      vendorIds: recipientVendorIds,
+      title: title.trim(),
+      body: message.trim(),
+      data: {
+        broadcastId: broadcast._id.toString(),
+        notificationType,
+        screen: "BroadcastDetails",
+      },
+      channelId: "broadcasts",
+      priority: notificationType === "IMPORTANT_NOTICE" ? "high" : "default",
+    }).catch((e) => console.warn("[VendorBroadcast Push Error]:", e.message));
 
     // 8. Security & Compliance Audit Log Entry
     await logAdminAction({

@@ -16,6 +16,7 @@ import { AppError } from "../middleware/errorMiddleware.js";
 import { FINANCE_CONFIG, calculateCommission } from "../config/financeConfig.js";
 import { logAdminAction } from "../services/auditService.js";
 import { getIO, emitVendorNotification, emitToDeliveryPartner } from "../socket/socketManager.js";
+import { sendPushToUsers, sendPushToVendors, sendPushToDeliveryPartners, sendPushToRoles } from "../services/pushNotificationService.js";
 import { uploadCategoryImageToCloudinary } from "../utils/cloudinaryUpload.js";
 
 // Helper to build date range from timeframe filter
@@ -2250,6 +2251,11 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
           data: notifData,
         });
       }
+
+      sendPushToUsers({ userIds: customers.map((c) => c._id), title, body, data: notifData, channelId: "broadcasts" }).catch(() => {});
+      sendPushToVendors({ vendorIds: vendors.map((v) => v._id), title, body, data: notifData, channelId: "broadcasts" }).catch(() => {});
+      sendPushToDeliveryPartners({ deliveryBoyIds: riders.map((r) => r._id), title, body, data: notifData, channelId: "broadcasts" }).catch(() => {});
+      sendPushToUsers({ userIds: staff.map((s) => s._id), title, body, data: notifData, channelId: "alerts" }).catch(() => {});
     }
     // ─────────────────────────────────────────────────────────────
     // CASE 2: CUSTOMERS ONLY ("CUSTOMERS" / "ALL_CUSTOMERS")
@@ -2269,6 +2275,7 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
       await batchInsertNotifications(customerDocs);
 
       if (io) io.emit("notification:broadcast", { title, body, deepLink, data: notifData });
+      sendPushToUsers({ userIds: customers.map((c) => c._id), title, body, data: notifData, channelId: "broadcasts" }).catch(() => {});
     }
     // ─────────────────────────────────────────────────────────────
     // CASE 3: VENDORS ONLY ("VENDORS" / "ALL_VENDORS")
@@ -2298,6 +2305,7 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
           });
         });
       }
+      sendPushToVendors({ vendorIds: vendors.map((v) => v._id), title, body, data: notifData, channelId: "broadcasts" }).catch(() => {});
     }
     // ─────────────────────────────────────────────────────────────
     // CASE 4: DELIVERY BOYS ONLY ("DELIVERY_BOYS" / "ALL_DELIVERY")
@@ -2336,6 +2344,7 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
           }
         });
       }
+      sendPushToDeliveryPartners({ deliveryBoyIds: riders.map((r) => r._id), title, body, data: notifData, channelId: "delivery" }).catch(() => {});
     }
     // ─────────────────────────────────────────────────────────────
     // CASE 5: ADMIN STAFF ONLY ("ADMIN_STAFF" / "ALL_ADMINS")
@@ -2362,6 +2371,7 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
           data: notifData,
         });
       }
+      sendPushToUsers({ userIds: staff.map((s) => s._id), title, body, data: notifData, channelId: "alerts" }).catch(() => {});
     }
     // ─────────────────────────────────────────────────────────────
     // CASE 6: SPECIFIC TARGET ("SPECIFIC" or legacy specific_*)
