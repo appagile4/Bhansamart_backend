@@ -2432,6 +2432,24 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
           type: "ANNOUNCEMENT",
           data: notifData,
         });
+
+        // Dispatch Mobile Push Notification to Vendor Devices
+        sendPushToVendors({
+          vendorIds: [vendor._id],
+          title: title.trim(),
+          body: body.trim(),
+          data: notifData,
+          channelId: "orders",
+        }).catch(() => {});
+        if (vendor.userId) {
+          sendPushToUsers({
+            userIds: [vendor.userId],
+            title: title.trim(),
+            body: body.trim(),
+            data: notifData,
+            channelId: "orders",
+          }).catch(() => {});
+        }
         recipientCount = 1;
       } else if (resolvedRole === "delivery_boy" || resolvedRole === "delivery") {
         const rider = (await DeliveryBoy.findById(targetId).populate("user")) || (await DeliveryBoy.findOne({ user: targetId }));
@@ -2452,6 +2470,24 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
         }
         if (io) {
           io.to(`user:${targetUserId.toString()}`).emit("delivery:notification", { title, message: body, data: notifData });
+        }
+
+        // Dispatch Mobile Push Notification to Delivery Partner Devices
+        sendPushToDeliveryPartners({
+          deliveryBoyIds: [rider?._id || targetId],
+          title: title.trim(),
+          body: body.trim(),
+          data: notifData,
+          channelId: "delivery",
+        }).catch(() => {});
+        if (targetUserId) {
+          sendPushToUsers({
+            userIds: [targetUserId],
+            title: title.trim(),
+            body: body.trim(),
+            data: notifData,
+            channelId: "delivery",
+          }).catch(() => {});
         }
         recipientCount = 1;
       } else if (resolvedRole === "admin" || resolvedRole === "staff") {
@@ -2476,6 +2512,15 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
             data: notifData,
           });
         }
+
+        // Dispatch Mobile Push Notification to Staff Devices
+        sendPushToUsers({
+          userIds: [adminUser._id],
+          title: title.trim(),
+          body: body.trim(),
+          data: notifData,
+          channelId: "alerts",
+        }).catch(() => {});
         recipientCount = 1;
       } else {
         // Customer or default User
@@ -2500,6 +2545,15 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
             data: notifData,
           });
         }
+
+        // Dispatch Mobile Push Notification to Customer Devices
+        sendPushToUsers({
+          userIds: [customer._id],
+          title: title.trim(),
+          body: body.trim(),
+          data: notifData,
+          channelId: "orders",
+        }).catch(() => {});
         recipientCount = 1;
       }
     } else {

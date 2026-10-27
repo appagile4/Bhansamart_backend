@@ -26,18 +26,19 @@ const buildMessagePayload = ({
 }) => {
   return {
     to: token,
-    sound,
+    sound: sound || "default",
     title: title || "BhansaMart",
     body: body || "",
     data: {
       ...data,
-      notificationId: data.notificationId || `push_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+      notificationId: data?.notificationId || `push_${Date.now()}_${Math.random().toString(36).substring(7)}`,
       timestamp: new Date().toISOString(),
     },
-    channelId,
-    priority,
-    badge,
+    channelId: channelId || "default",
+    priority: priority || "high",
+    badge: typeof badge === "number" ? badge : 1,
     ttl,
+    _displayInForeground: true,
   };
 };
 
