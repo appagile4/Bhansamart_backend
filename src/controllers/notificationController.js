@@ -255,10 +255,16 @@ export const getUnreadNotificationCount = async (req, res, next) => {
 
     let unreadCount = 0;
     if (isVendorRole) {
-      const vendorDoc = await Vendor.findOne({ userId: req.user._id }).select("_id");
-      if (vendorDoc) {
+      let vendorId = req.user.vendorId;
+      if (!vendorId) {
+        const vendorDoc = await Vendor.findOne({
+          $or: [{ userId: req.user._id }, { _id: req.user._id }],
+        }).select("_id");
+        if (vendorDoc) vendorId = vendorDoc._id;
+      }
+      if (vendorId) {
         unreadCount = await VendorNotification.countDocuments({
-          vendor: vendorDoc._id,
+          vendor: vendorId,
           isRead: false,
         });
       }
