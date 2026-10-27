@@ -28,6 +28,7 @@ import {
   replyToTicketAdmin,
   sendTargetedNotificationAdmin,
   searchNotificationRecipientsAdmin,
+  getTargetedNotificationHistoryAdmin,
   getLiveOperationalMapData,
   getAuditLogsAdmin,
 } from "../controllers/adminManagementController.js";
@@ -114,6 +115,7 @@ router.post("/tickets/:id/reply", replyToTicketAdmin);
 // 8. Targeted Notifications
 router.post("/notifications/send", sendTargetedNotificationAdmin);
 router.get("/notifications/search-recipients", searchNotificationRecipientsAdmin);
+router.get("/notifications/history", getTargetedNotificationHistoryAdmin);
 
 // 8.1 Vendor Broadcast Notifications (Staff & Super Admin with Granular RBAC)
 router.get("/broadcasts/permissions", getBroadcastPermissions);

@@ -12,6 +12,7 @@ import VendorTransaction from "../models/VendorTransaction.js";
 import Refund from "../models/Refund.js";
 import Notification from "../models/Notification.js";
 import VendorNotification from "../models/VendorNotification.js";
+import VendorBroadcast from "../models/VendorBroadcast.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import { FINANCE_CONFIG, calculateCommission } from "../config/financeConfig.js";
 import { logAdminAction } from "../services/auditService.js";
@@ -2376,7 +2377,8 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
     // ─────────────────────────────────────────────────────────────
     // CASE 6: SPECIFIC TARGET ("SPECIFIC" or legacy specific_*)
     // ─────────────────────────────────────────────────────────────
-    else if (
+    let recipientDisplayName = "";
+    if (
       normAudience === "SPECIFIC" ||
       normAudience === "SPECIFIC_USER" ||
       targetAudience === "specific_customer" ||
@@ -2399,6 +2401,12 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
       if (resolvedRole === "vendor") {
         const vendor = await Vendor.findById(targetId);
         if (!vendor) return next(new AppError("Vendor not found", 404));
+
+        recipientDisplayName =
+          vendor.sellerDetails?.sellerName ||
+          vendor.businessDetails?.businessName ||
+          vendor.name ||
+          "Vendor";
 
         await VendorNotification.create({
           vendor: vendor._id,
@@ -2429,6 +2437,8 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
         const rider = (await DeliveryBoy.findById(targetId).populate("user")) || (await DeliveryBoy.findOne({ user: targetId }));
         const targetUserId = rider?.user?._id || rider?.user || targetId;
 
+        recipientDisplayName = rider?.name || rider?.user?.name || "Delivery Partner";
+
         await Notification.create({
           user: targetUserId,
           title: title.trim(),
@@ -2447,6 +2457,8 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
       } else if (resolvedRole === "admin" || resolvedRole === "staff") {
         const adminUser = await User.findById(targetId);
         if (!adminUser) return next(new AppError("Staff Admin not found", 404));
+
+        recipientDisplayName = adminUser.name || "Staff Admin";
 
         await Notification.create({
           user: adminUser._id,
@@ -2469,6 +2481,8 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
         // Customer or default User
         const customer = await User.findById(targetId);
         if (!customer) return next(new AppError("Customer not found", 404));
+
+        recipientDisplayName = customer.name || "Customer";
 
         await Notification.create({
           user: customer._id,
@@ -2497,6 +2511,17 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
       action: "SEND_TARGETED_NOTIFICATION",
       targetResource: "Notification",
       details: `Sent notification '${title}' to audience: ${targetAudience} (${recipientCount} recipients)`,
+      changes: {
+        title: title.trim(),
+        body: body.trim(),
+        targetAudience,
+        targetRole,
+        targetId,
+        recipientName: recipientDisplayName,
+        deepLink: deepLink || "",
+        recipientCount,
+        data: notifData,
+      },
     });
 
     res.status(200).json({
@@ -2507,6 +2532,104 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
         targetAudience,
         recipientCount,
         dispatchedAt: new Date(),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get unified notification broadcast history (targeted notifications + vendor broadcasts)
+ */
+export const getTargetedNotificationHistoryAdmin = async (req, res, next) => {
+  try {
+    const isSuperAdmin = req.user.role === "superadmin";
+    const { page = 1, limit = 20, search = "" } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    const query = { action: "SEND_TARGETED_NOTIFICATION" };
+    if (!isSuperAdmin) {
+      query.actor = req.user._id;
+    }
+
+    if (search && search.trim()) {
+      const q = search.trim();
+      query.$or = [
+        { details: { $regex: q, $options: "i" } },
+        { "changes.title": { $regex: q, $options: "i" } },
+        { "changes.body": { $regex: q, $options: "i" } },
+        { actorName: { $regex: q, $options: "i" } },
+      ];
+    }
+
+    const [logs, totalLogs, vendorBroadcasts] = await Promise.all([
+      AuditLog.find(query)
+        .populate("actor", "name email role")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      AuditLog.countDocuments(query),
+      VendorBroadcast.find(isSuperAdmin ? {} : { sender: req.user._id })
+        .populate("sender", "name email role")
+        .sort({ createdAt: -1 })
+        .limit(30)
+        .lean()
+        .catch(() => []),
+    ]);
+
+    const auditItems = logs.map((log) => ({
+      _id: log._id,
+      title: log.changes?.title || (log.details?.match(/'(.*?)'/)?.[1] || "Targeted Notification"),
+      body: log.changes?.body || log.details || "",
+      targetAudience: log.changes?.targetAudience || (log.details?.match(/audience:\s*([^\s(]+)/)?.[1] || "ALL"),
+      targetRole: log.changes?.targetRole,
+      targetId: log.changes?.targetId,
+      recipientName: log.changes?.recipientName,
+      deepLink: log.changes?.deepLink,
+      recipientCount: log.changes?.recipientCount || (parseInt(log.details?.match(/\((\d+)\s*recipients\)/)?.[1], 10) || 0),
+      senderName: log.actorName || log.actor?.name || "Admin",
+      senderEmail: log.actorEmail || log.actor?.email,
+      senderRole: log.actorRole || log.actor?.role,
+      source: "TARGETED",
+      createdAt: log.createdAt,
+    }));
+
+    const broadcastItems = (vendorBroadcasts || []).map((vb) => ({
+      _id: vb._id,
+      title: vb.title,
+      body: vb.message,
+      targetAudience:
+        vb.targetType === "ALL_VENDORS"
+          ? "VENDORS"
+          : vb.targetType === "ASSIGNED_VENDORS"
+          ? "ASSIGNED_VENDORS"
+          : "SPECIFIC",
+      targetRole: "vendor",
+      recipientCount: vb.recipientCount || (vb.targetVendorIds?.length || 0),
+      senderName: vb.senderName || vb.sender?.name || "Admin",
+      senderEmail: vb.senderEmail || vb.sender?.email,
+      senderRole: vb.senderRole || vb.sender?.role,
+      source: "VENDOR_BROADCAST",
+      createdAt: vb.createdAt,
+    }));
+
+    // Merge and sort by createdAt descending
+    const combined = [...auditItems, ...broadcastItems].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+
+    res.status(200).json({
+      success: true,
+      data: {
+        history: combined.slice(0, limitNum),
+        total: totalLogs + broadcastItems.length,
+        page: pageNum,
+        pages: Math.max(1, Math.ceil((totalLogs + broadcastItems.length) / limitNum)),
       },
     });
   } catch (error) {
