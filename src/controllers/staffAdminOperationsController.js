@@ -1058,7 +1058,7 @@ export const getDeliveryCodReconciliationAdmin = async (req, res, next) => {
       {
         $match: {
           orderStatus: "DELIVERED",
-          paymentMethod: "Cash on delivery",
+          paymentMethod: { $in: ["Cash on delivery", "COD", "cash_on_delivery", "Cash On Delivery"] },
           ...vendorFilter,
         },
       },
@@ -1072,7 +1072,7 @@ export const getDeliveryCodReconciliationAdmin = async (req, res, next) => {
                 $expr: {
                   $and: [
                     { $eq: ["$order", "$$ordId"] },
-                    { $eq: ["$status", "COMPLETED"] },
+                    { $in: ["$status", ["COMPLETED", "DELIVERED"]] },
                   ],
                 },
               },
@@ -1085,7 +1085,7 @@ export const getDeliveryCodReconciliationAdmin = async (req, res, next) => {
       {
         $group: {
           _id: {
-            deliveryBoy: "$assignment.deliveryBoy",
+            deliveryBoy: { $ifNull: ["$assignment.deliveryBoy", "$assignedDeliveryBoy"] },
             vendor: "$vendor",
           },
           ordersCount: { $sum: 1 },
@@ -1218,7 +1218,9 @@ export const getDeliveryCodReconciliationAdmin = async (req, res, next) => {
 export const raiseCodDisputeAdmin = async (req, res, next) => {
   try {
     const { deliveryBoyId, vendorId, notes, disputedAmount } = req.body;
-    assertVendorAccessible(req, vendorId);
+    if (vendorId) {
+      assertVendorAccessible(req, vendorId);
+    }
 
     // Create Audit Log entry for the dispute
     await AuditLog.create({
