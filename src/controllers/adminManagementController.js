@@ -1816,11 +1816,19 @@ export const moderateProductAdmin = async (req, res, next) => {
  */
 export const getAllFinancialTransactions = async (req, res, next) => {
   try {
-    const { vendorId, type, page = 1, limit = 25 } = req.query;
+    const { vendorId, type, search, page = 1, limit = 25 } = req.query;
 
     const query = {};
     if (vendorId) query.vendor = vendorId;
-    if (type) query.type = type;
+    if (type && type !== "ALL") query.type = type;
+
+    if (search) {
+      query.$or = [
+        { notes: { $regex: search, $options: "i" } },
+        { paymentMethod: { $regex: search, $options: "i" } },
+        { bankReference: { $regex: search, $options: "i" } },
+      ];
+    }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
@@ -1828,8 +1836,9 @@ export const getAllFinancialTransactions = async (req, res, next) => {
 
     const [transactions, total] = await Promise.all([
       VendorTransaction.find(query)
-        .populate("vendor", "businessDetails.businessName")
-        .populate("order", "orderNumber totalAmount paymentMethod")
+        .populate("vendor", "businessDetails.businessName sellerDetails.sellerName sellerDetails.sellerPhone bankDetails wallet")
+        .populate("order", "orderNumber totalAmount paymentMethod orderStatus")
+        .populate("deliveryBoy", "name phone")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
@@ -1852,7 +1861,7 @@ export const getAllFinancialTransactions = async (req, res, next) => {
 
 export const getAllWithdrawalsAdmin = async (req, res, next) => {
   try {
-    const { status = "PENDING" } = req.query;
+    const { status = "ALL" } = req.query;
 
     const query = { type: "WITHDRAWAL_REQUEST" };
     if (status && status !== "ALL") {
@@ -1860,7 +1869,7 @@ export const getAllWithdrawalsAdmin = async (req, res, next) => {
     }
 
     const withdrawals = await VendorTransaction.find(query)
-      .populate("vendor", "businessDetails.businessName sellerDetails.sellerPhone wallet")
+      .populate("vendor", "businessDetails.businessName sellerDetails.sellerName sellerDetails.sellerPhone bankDetails wallet")
       .sort({ createdAt: -1 })
       .lean();
 

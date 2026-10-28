@@ -57,9 +57,14 @@ export const getMyAssignedVendors = async (req, res, next) => {
     const query = { status: { $ne: "deleted" } };
 
     if (!isSuperAdmin) {
-      const validIds = (accessibleIds || [])
-        .filter((id) => id && mongoose.Types.ObjectId.isValid(id))
-        .map((id) => new mongoose.Types.ObjectId(id));
+      // Find vendors assigned either via user.assignedVendors OR vendor.assignedAdmin
+      const directVendors = await Vendor.find({
+        $or: [
+          { assignedAdmin: req.user._id },
+          { _id: { $in: (accessibleIds || []).filter((id) => id && mongoose.Types.ObjectId.isValid(id)).map((id) => new mongoose.Types.ObjectId(id)) } },
+        ],
+      }).select("_id").lean();
+      const validIds = directVendors.map((v) => v._id);
       query._id = { $in: validIds };
     }
 
@@ -511,28 +516,33 @@ export const getVendorSalesAnalytics = async (req, res, next) => {
       filterStart = new Date(now.getFullYear(), now.getMonth(), 1);
     } else if (activeRange === "custom" && startDate) {
       filterStart = new Date(startDate);
+    } else if (activeRange === "all" || activeRange === "alltime" || activeRange === "lifetime") {
+      filterStart = null;
     } else {
       filterStart.setDate(filterStart.getDate() - 7);
     }
 
-    const dateFilter = {
-      createdAt: { $gte: filterStart },
-    };
+    const dateFilter = {};
+    if (filterStart) {
+      dateFilter.createdAt = { $gte: filterStart };
+    }
     if (vendorFilter) {
       dateFilter.vendor = vendorFilter;
     }
-    if (activeRange === "yesterday") {
+    if (activeRange === "yesterday" && filterStart) {
       const yesterdayEnd = new Date(filterStart);
       yesterdayEnd.setHours(23, 59, 59, 999);
-      dateFilter.createdAt.$lte = yesterdayEnd;
+      dateFilter.createdAt = { $gte: filterStart, $lte: yesterdayEnd };
     } else if (activeRange === "custom" && endDate) {
-      dateFilter.createdAt.$lte = new Date(endDate);
+      dateFilter.createdAt = { ...(dateFilter.createdAt || {}), $lte: new Date(endDate) };
     }
 
     const refundMatch = {
       status: { $in: ["APPROVED", "PROCESSING", "COMPLETED"] },
-      createdAt: { $gte: filterStart },
     };
+    if (filterStart) {
+      refundMatch.createdAt = { $gte: filterStart };
+    }
     if (vendorFilter) {
       refundMatch.vendor = vendorFilter;
     }
@@ -549,21 +559,22 @@ export const getVendorSalesAnalytics = async (req, res, next) => {
               grossSales: { $sum: "$totalAmount" },
               completedOrdersCount: {
                 $sum: {
-                  $cond: [{ $eq: ["$orderStatus", "DELIVERED"] }, 1, 0],
+                  $cond: [{ $eq: [{ $toUpper: "$orderStatus" }, "DELIVERED"] }, 1, 0],
                 },
               },
               completedSales: {
                 $sum: {
-                  $cond: [{ $eq: ["$orderStatus", "DELIVERED"] }, "$totalAmount", 0],
+                  $cond: [{ $eq: [{ $toUpper: "$orderStatus" }, "DELIVERED"] }, "$totalAmount", 0],
                 },
               },
               codSales: {
                 $sum: {
                   $cond: [
                     {
-                      $and: [
-                        { $eq: ["$orderStatus", "DELIVERED"] },
+                      $or: [
                         { $eq: ["$paymentMethod", "Cash on delivery"] },
+                        { $eq: ["$paymentMethod", "Vendor QR Code (Direct)"] },
+                        { $regexMatch: { input: { $ifNull: ["$paymentMethod", ""] }, regex: /cash|cod|qr/i } },
                       ],
                     },
                     "$totalAmount",
@@ -576,8 +587,9 @@ export const getVendorSalesAnalytics = async (req, res, next) => {
                   $cond: [
                     {
                       $and: [
-                        { $eq: ["$orderStatus", "DELIVERED"] },
                         { $ne: ["$paymentMethod", "Cash on delivery"] },
+                        { $ne: ["$paymentMethod", "Vendor QR Code (Direct)"] },
+                        { $not: [{ $regexMatch: { input: { $ifNull: ["$paymentMethod", ""] }, regex: /cash|cod|qr/i } }] },
                       ],
                     },
                     "$totalAmount",
@@ -587,7 +599,7 @@ export const getVendorSalesAnalytics = async (req, res, next) => {
               },
               cancelledOrdersCount: {
                 $sum: {
-                  $cond: [{ $eq: ["$orderStatus", "CANCELLED"] }, 1, 0],
+                  $cond: [{ $eq: [{ $toUpper: "$orderStatus" }, "CANCELLED"] }, 1, 0],
                 },
               },
             },
@@ -606,16 +618,40 @@ export const getVendorSalesAnalytics = async (req, res, next) => {
           },
         ]),
 
-        // Sales by Category
+        // Sales by Category (with product lookup fallback)
         Order.aggregate([
           { $match: dateFilter },
           { $unwind: "$items" },
           {
+            $lookup: {
+              from: "products",
+              localField: "items.product",
+              foreignField: "_id",
+              as: "productDoc",
+            },
+          },
+          {
             $group: {
-              _id: "$items.category",
-              count: { $sum: "$items.quantity" },
+              _id: {
+                $ifNull: [
+                  {
+                    $cond: [
+                      { $and: [{ $ne: ["$items.category", ""] }, { $ne: ["$items.category", null] }] },
+                      "$items.category",
+                      { $arrayElemAt: ["$productDoc.category", 0] },
+                    ],
+                  },
+                  "General",
+                ],
+              },
+              count: { $sum: { $ifNull: ["$items.quantity", 1] } },
               totalSales: {
-                $sum: { $multiply: ["$items.price", "$items.quantity"] },
+                $sum: {
+                  $multiply: [
+                    { $ifNull: ["$items.price", 0] },
+                    { $ifNull: ["$items.quantity", 1] },
+                  ],
+                },
               },
             },
           },
@@ -631,6 +667,12 @@ export const getVendorSalesAnalytics = async (req, res, next) => {
               _id: null,
               refundsCount: { $sum: 1 },
               totalRefundAmount: { $sum: "$amount" },
+              completedRefundsCount: {
+                $sum: { $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0] },
+              },
+              completedRefundAmount: {
+                $sum: { $cond: [{ $eq: ["$status", "COMPLETED"] }, "$amount", 0] },
+              },
             },
           },
         ]),
@@ -649,9 +691,13 @@ export const getVendorSalesAnalytics = async (req, res, next) => {
     const refunds = refundsSummary[0] || {
       refundsCount: 0,
       totalRefundAmount: 0,
+      completedRefundsCount: 0,
+      completedRefundAmount: 0,
     };
 
-    const netSales = Math.max(0, summary.completedSales - refunds.totalRefundAmount);
+    // Net sales: Real completed delivered sales minus actually completed refunds
+    const completedOrGross = summary.completedSales > 0 ? summary.completedSales : summary.grossSales;
+    const netSales = Math.max(0, completedOrGross - (refunds.completedRefundAmount || refunds.totalRefundAmount || 0));
     const returnRefundRate =
       summary.totalOrders > 0
         ? parseFloat(((refunds.refundsCount / summary.totalOrders) * 100).toFixed(2))
@@ -660,8 +706,10 @@ export const getVendorSalesAnalytics = async (req, res, next) => {
     // Daily Sales Timeline (for trend graphs)
     const timelineMatch = {
       orderStatus: { $ne: "CANCELLED" },
-      createdAt: { $gte: filterStart },
     };
+    if (filterStart) {
+      timelineMatch.createdAt = { $gte: filterStart };
+    }
     if (vendorFilter) {
       timelineMatch.vendor = vendorFilter;
     }
@@ -679,24 +727,49 @@ export const getVendorSalesAnalytics = async (req, res, next) => {
       { $sort: { _id: 1 } },
     ]);
 
-    // Top Selling Products
+    // Top Selling Products (with lookup fallback)
     const topProducts = await Order.aggregate([
       { $match: dateFilter },
       { $unwind: "$items" },
       {
+        $lookup: {
+          from: "products",
+          localField: "items.product",
+          foreignField: "_id",
+          as: "productDoc",
+        },
+      },
+      {
         $group: {
-          _id: "$items.product",
-          name: { $first: "$items.name" },
-          imageUrl: { $first: "$items.imageUrl" },
-          price: { $first: "$items.price" },
-          unitsSold: { $sum: "$items.quantity" },
+          _id: { $ifNull: ["$items.product", "$items.productId"] },
+          name: {
+            $first: {
+              $ifNull: ["$items.name", { $arrayElemAt: ["$productDoc.name", 0] }, "Product"],
+            },
+          },
+          imageUrl: {
+            $first: {
+              $ifNull: [
+                "$items.imageUrl",
+                { $arrayElemAt: ["$productDoc.images.0", 0] },
+                "",
+              ],
+            },
+          },
+          price: { $first: { $ifNull: ["$items.price", 0] } },
+          unitsSold: { $sum: { $ifNull: ["$items.quantity", 1] } },
           totalRevenue: {
-            $sum: { $multiply: ["$items.price", "$items.quantity"] },
+            $sum: {
+              $multiply: [
+                { $ifNull: ["$items.price", 0] },
+                { $ifNull: ["$items.quantity", 1] },
+              ],
+            },
           },
         },
       },
       { $sort: { unitsSold: -1 } },
-      { $limit: 6 },
+      { $limit: 8 },
     ]);
 
     const analyticsData = {
@@ -818,9 +891,15 @@ export const getVendorProductsAnalytics = async (req, res, next) => {
       const returnedUnits = p.refundsCount || 0;
       const grossSales = unitsSold * (p.price || 0);
       const netSales = Math.max(0, grossSales - returnedUnits * (p.price || 0));
+      const firstImage = Array.isArray(p.images) && p.images.length > 0
+        ? (typeof p.images[0] === "string" ? p.images[0] : p.images[0]?.url || "")
+        : "";
 
       return {
         ...p,
+        title: p.name,
+        name: p.name,
+        imageUrl: firstImage,
         unitsSold,
         returnedUnits,
         grossSales,
