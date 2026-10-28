@@ -23,6 +23,12 @@ const deliveryEarningsLedgerSchema = new mongoose.Schema(
       type: String,
       default: "Cash on delivery",
     },
+    refund: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Refund",
+      default: null,
+      index: true,
+    },
     earningType: {
       type: String,
       enum: ["COD_DELIVERY", "ONLINE_DELIVERY", "RETURN_PICKUP", "BONUS"],
@@ -84,7 +90,7 @@ const deliveryEarningsLedgerSchema = new mongoose.Schema(
 );
 
 deliveryEarningsLedgerSchema.index({ deliveryBoy: 1, createdAt: -1 });
-deliveryEarningsLedgerSchema.index({ order: 1 }, { unique: true });
+deliveryEarningsLedgerSchema.index({ order: 1, earningType: 1 }, { unique: true, sparse: true });
 
 const DeliveryEarningsLedger =
   mongoose.models.DeliveryEarningsLedger ||

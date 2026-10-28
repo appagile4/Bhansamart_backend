@@ -40,6 +40,7 @@ const vendorTransactionSchema = new mongoose.Schema(
         "COMMISSION_DEDUCTION",
         "RECOVERY_ADJUSTMENT",
         "VENDOR_DIRECT_REFUND",
+        "RETURN_PICKUP_CHARGE",
       ],
       required: true,
       index: true,

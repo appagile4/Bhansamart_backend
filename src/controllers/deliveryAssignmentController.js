@@ -6,6 +6,7 @@ import Vendor from "../models/Vendor.js";
 import VendorTransaction from "../models/VendorTransaction.js";
 import VendorNotification from "../models/VendorNotification.js";
 import DeliveryEarningsLedger from "../models/DeliveryEarningsLedger.js";
+import Refund from "../models/Refund.js";
 import { sendPushToUsers, sendPushToVendors } from "../services/pushNotificationService.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
@@ -797,6 +798,37 @@ export const cancelActiveDelivery = async (req, res, next) => {
       maxAttempts: MAX_DELIVERY_ATTEMPTS,
       message: `Delivery cancelled. Package returned to vendor. Re-dispatching to next nearest partner (Attempt ${order.deliveryCancellationCount} of ${MAX_DELIVERY_ATTEMPTS}).`,
       order,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get assigned return pickups for logged in delivery partner
+ * GET /api/delivery/assignments/return-pickups
+ */
+export const getAssignedReturnPickups = async (req, res, next) => {
+  try {
+    const deliveryBoy = await DeliveryBoy.findOne({ user: req.user._id });
+    if (!deliveryBoy) {
+      return next(new AppError("Delivery partner profile not found", 404));
+    }
+
+    const returnPickups = await Refund.find({
+      "pickup.deliveryBoy": deliveryBoy._id,
+      "pickup.status": { $in: ["ASSIGNED", "OUT_FOR_PICKUP"] },
+    })
+      .populate("order", "orderNumber totalAmount paymentMethod deliveryAddress items")
+      .populate("vendor", "businessDetails sellerDetails shippingLocations phone")
+      .populate("customer", "name phone email")
+      .sort({ "pickup.scheduledAt": -1 })
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      count: returnPickups.length,
+      data: returnPickups,
     });
   } catch (error) {
     next(error);

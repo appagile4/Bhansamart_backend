@@ -1,6 +1,7 @@
 import Vendor from "../models/Vendor.js";
 import Order from "../models/Order.js";
 import DeliveryBoy from "../models/DeliveryBoy.js";
+import DeliveryEarningsLedger from "../models/DeliveryEarningsLedger.js";
 import VendorTransaction from "../models/VendorTransaction.js";
 import CodHandover from "../models/CodHandover.js";
 import Refund from "../models/Refund.js";
@@ -633,6 +634,8 @@ export async function processOrderRefund(arg1 = {}, arg2 = {}) {
   const params = arg1 && arg1._id ? { order: arg1, ...arg2 } : arg1;
   const {
     order,
+    refundId,
+    refund: existingRefundDoc,
     items = [],
     refundAmount,
     reason = "Customer cancellation / return",
@@ -693,11 +696,11 @@ export async function processOrderRefund(arg1 = {}, arg2 = {}) {
   // Generate unique refund number
   const refundNumber = await Refund.generateRefundNumber();
 
-  // Calculate pro-rata commission reversal
-  const { vendorDeduction, commissionReversal } = calculateRefundReversal(
-    requestedAmount,
-    FINANCE_CONFIG.SUPERADMIN_COMMISSION_RATE
-  );
+  // Mandatory Rule: Preserve Super Admin commission already earned according to existing commission ledger.
+  // Processing a return or refund must not silently reduce, reverse, or recalculate that commission.
+  // Do not create an extra commission entry or duplicate an existing commission.
+  const commissionReversal = 0;
+  const vendorDeduction = requestedAmount;
 
   const vendor = await Vendor.findById(order.vendor?._id || order.vendor);
   if (vendor && !vendor.wallet) {
@@ -733,6 +736,7 @@ export async function processOrderRefund(arg1 = {}, arg2 = {}) {
       });
     } else {
       // ── ONLINE ORDER REFUND ──
+      // Superadmin commission is preserved intact; no commission reversal.
       // If vendor has enough available balance:
       if ((vendor.wallet.currentBalance || 0) >= vendorDeduction) {
         vendor.wallet.currentBalance = Math.round((vendor.wallet.currentBalance - vendorDeduction) * 100) / 100;
@@ -751,38 +755,21 @@ export async function processOrderRefund(arg1 = {}, arg2 = {}) {
       );
       await vendor.save();
 
-      // 1. Record VendorTransaction for Vendor Earning Reversal
+      // Record VendorTransaction for Vendor Refund Deduction (commission preserved)
       await VendorTransaction.create({
         vendor: vendor._id,
         order: order._id,
         type: "REFUND_DEDUCTION",
         amount: vendorDeduction,
         grossAmount: requestedAmount,
-        commission: commissionReversal,
-        commissionRate: FINANCE_CONFIG.SUPERADMIN_COMMISSION_RATE,
+        commission: 0, // Commission reversal NOT performed
+        commissionRate: 0,
         commissionBase: requestedAmount,
         netAmount: -vendorDeduction,
         paymentMethod: order.paymentMethod,
         status: "SETTLED",
         idempotencyKey: `REF-VEND-DED-${dedupeKey}`,
-        notes: `Refund #${refundNumber} deduction of NPR ${vendorDeduction} for Order #${order.orderNumber} (Reason: ${reason}).`,
-      });
-
-      // 2. Record VendorTransaction for 1.5% Superadmin Commission Reversal
-      await VendorTransaction.create({
-        vendor: vendor._id,
-        order: order._id,
-        type: "COMMISSION_REVERSAL",
-        amount: commissionReversal,
-        grossAmount: requestedAmount,
-        commission: -commissionReversal,
-        commissionRate: FINANCE_CONFIG.SUPERADMIN_COMMISSION_RATE,
-        commissionBase: requestedAmount,
-        netAmount: commissionReversal,
-        paymentMethod: order.paymentMethod,
-        status: "REVERSED",
-        idempotencyKey: `REF-COMM-REV-${dedupeKey}`,
-        notes: `Platform 1.5% commission reversal of NPR ${commissionReversal} for Refund #${refundNumber}.`,
+        notes: `Refund #${refundNumber} deduction of NPR ${vendorDeduction} for Order #${order.orderNumber} (Reason: ${reason}). Platform commission preserved.`,
       });
     }
   }
@@ -816,46 +803,69 @@ export async function processOrderRefund(arg1 = {}, arg2 = {}) {
   });
   await order.save();
 
-  // ── Create Persistent Refund Record ──
-  const refundRecord = await Refund.create({
-    refundNumber,
-    order: order._id,
-    orderNumber: order.orderNumber,
-    customer: order.customer,
-    vendor: order.vendor?._id || order.vendor,
-    claimType,
-    items: itemsToRestore.map((i) => ({
-      product: i.product || i.productId,
-      productId: (i.product || i.productId).toString(),
-      name: i.name || "Item",
-      price: i.price,
-      quantity: i.quantity,
-      imageUrl: i.imageUrl || "",
-    })),
-    amount: requestedAmount,
-    originalPaymentMethod: order.paymentMethod,
-    vendorDeduction: requiresFinancialPayout ? vendorDeduction : 0,
-    commissionReversal: requiresFinancialPayout ? commissionReversal : 0,
-    commissionRate: FINANCE_CONFIG.SUPERADMIN_COMMISSION_RATE,
-    reason,
-    description,
-    proofImages,
-    status: "COMPLETED",
-    isVendorFunded: isCod,
-    gatewayRefundId: customerPayoutDetails.payoutReference || `REF-GTW-${Date.now()}`,
-    customerPayoutDetails: {
-      method: customerPayoutDetails.method || (isCod ? "UPI" : "GATEWAY_REVERSAL"),
-      upiId: customerPayoutDetails.upiId || "",
-      accountNumber: customerPayoutDetails.accountNumber || "",
-      bankName: customerPayoutDetails.bankName || "",
-      accountHolderName: customerPayoutDetails.accountHolderName || "",
-      payoutReference: customerPayoutDetails.payoutReference || `TXN-REF-${Date.now()}`,
-      payoutCompletedAt: new Date(),
-    },
-    reviewedBy,
-    reviewedAt: new Date(),
-    idempotencyKey: dedupeKey,
-  });
+  // ── Create or Update Persistent Refund Record ──
+  let refundRecord = null;
+  const targetRefundId = refundId || (existingRefundDoc?._id || existingRefundDoc);
+  if (targetRefundId) {
+    refundRecord = await Refund.findById(targetRefundId);
+  }
+
+  if (refundRecord) {
+    refundRecord.status = "COMPLETED";
+    refundRecord.amount = requestedAmount;
+    refundRecord.vendorDeduction = requiresFinancialPayout ? vendorDeduction : 0;
+    refundRecord.commissionReversal = requiresFinancialPayout ? commissionReversal : 0;
+    refundRecord.reviewedBy = reviewedBy || refundRecord.reviewedBy;
+    refundRecord.reviewedAt = new Date();
+    if (customerPayoutDetails && customerPayoutDetails.payoutReference) {
+      refundRecord.customerPayoutDetails = {
+        ...refundRecord.customerPayoutDetails,
+        ...customerPayoutDetails,
+        payoutCompletedAt: new Date(),
+      };
+    }
+    await refundRecord.save();
+  } else {
+    refundRecord = await Refund.create({
+      refundNumber,
+      order: order._id,
+      orderNumber: order.orderNumber,
+      customer: order.customer,
+      vendor: order.vendor?._id || order.vendor,
+      claimType,
+      items: itemsToRestore.map((i) => ({
+        product: i.product || i.productId,
+        productId: (i.product || i.productId).toString(),
+        name: i.name || "Item",
+        price: i.price,
+        quantity: i.quantity,
+        imageUrl: i.imageUrl || "",
+      })),
+      amount: requestedAmount,
+      originalPaymentMethod: order.paymentMethod,
+      vendorDeduction: requiresFinancialPayout ? vendorDeduction : 0,
+      commissionReversal: requiresFinancialPayout ? commissionReversal : 0,
+      commissionRate: FINANCE_CONFIG.SUPERADMIN_COMMISSION_RATE,
+      reason,
+      description,
+      proofImages,
+      status: "COMPLETED",
+      isVendorFunded: isCod,
+      gatewayRefundId: customerPayoutDetails.payoutReference || `REF-GTW-${Date.now()}`,
+      customerPayoutDetails: {
+        method: customerPayoutDetails.method || (isCod ? "UPI" : "GATEWAY_REVERSAL"),
+        upiId: customerPayoutDetails.upiId || "",
+        accountNumber: customerPayoutDetails.accountNumber || "",
+        bankName: customerPayoutDetails.bankName || "",
+        accountHolderName: customerPayoutDetails.accountHolderName || "",
+        payoutReference: customerPayoutDetails.payoutReference || `TXN-REF-${Date.now()}`,
+        payoutCompletedAt: new Date(),
+      },
+      reviewedBy,
+      reviewedAt: new Date(),
+      idempotencyKey: dedupeKey,
+    });
+  }
 
   // ── Handle Replacement Order (Zero customer charge, zero duplicate sales) ──
   let replacementOrder = null;
@@ -932,5 +942,138 @@ export async function processOrderRefund(arg1 = {}, arg2 = {}) {
     commissionReversal,
     commissionReversed: commissionReversal,
     replacementOrder,
+  };
+}
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 5. RETURN PICKUP EARNING & VENDOR WALLET DEDUCTION
+ * - Deducts eligible return pickup fee from the responsible vendor's wallet
+ * - Credits delivery boy return-pickup earning only when confirmed
+ * - Idempotent: uses matching unique transaction reference
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+export async function processReturnPickupAccounting({
+  refundId,
+  deliveryBoyId,
+  vendorId,
+  pickupCharge = 50,
+}) {
+  const refund = await Refund.findById(refundId);
+  if (!refund) {
+    throw new AppError("Refund record not found for pickup accounting", 404);
+  }
+
+  // Idempotency check: don't double charge or double pay
+  if (refund.pickup?.isPickupChargeDebited && refund.pickup?.isDeliveryBoyPaid) {
+    return {
+      success: true,
+      alreadyProcessed: true,
+      pickupCharge,
+      matchingRef: refund.pickup.pickupChargeTxRef,
+    };
+  }
+
+  const targetVendorId = vendorId || refund.vendor;
+  const vendor = await Vendor.findById(targetVendorId);
+  if (!vendor) {
+    throw new AppError("Responsible vendor not found for return pickup debit", 404);
+  }
+
+  const targetDeliveryBoyId = deliveryBoyId || refund.pickup?.deliveryBoy;
+  const deliveryBoy = await DeliveryBoy.findById(targetDeliveryBoyId);
+  if (!deliveryBoy) {
+    throw new AppError("Assigned delivery partner not found for return pickup credit", 404);
+  }
+
+  const charge = Number(pickupCharge) || 50;
+  const matchingRef = refund.pickup?.pickupChargeTxRef || `RET-FEE-${refund.refundNumber || refund._id}`;
+
+  if (!vendor.wallet) {
+    vendor.wallet = {
+      currentBalance: 0,
+      totalEarned: 0,
+      pendingSettlement: 0,
+      codCashWithDeliveryBoys: 0,
+      pendingRecoveries: 0,
+    };
+  }
+
+  // 1. Debit Vendor Wallet
+  if ((vendor.wallet.currentBalance || 0) >= charge) {
+    vendor.wallet.currentBalance = Math.round((vendor.wallet.currentBalance - charge) * 100) / 100;
+  } else {
+    const deficit = Math.round((charge - (vendor.wallet.currentBalance || 0)) * 100) / 100;
+    vendor.wallet.currentBalance = 0;
+    vendor.wallet.pendingRecoveries = Math.round(((vendor.wallet.pendingRecoveries || 0) + deficit) * 100) / 100;
+  }
+  await vendor.save();
+
+  await VendorTransaction.create({
+    vendor: vendor._id,
+    order: refund.order,
+    refund: refund._id,
+    type: "RETURN_PICKUP_CHARGE",
+    amount: charge,
+    grossAmount: charge,
+    commission: 0,
+    commissionRate: 0,
+    commissionBase: charge,
+    netAmount: -charge,
+    status: "SETTLED",
+    idempotencyKey: `VEND-PICKUP-DED-${refund._id}`,
+    notes: `Return pickup fee of NPR ${charge} debited for Claim #${refund.refundNumber}. Matching Ref: ${matchingRef}`,
+  }).catch((err) => {
+    console.error("   [VendorTx Create Error]:", err.message);
+  });
+
+  // 2. Credit Delivery Boy
+  if (!deliveryBoy.wallet) {
+    deliveryBoy.wallet = {
+      currentBalance: 0,
+      totalEarned: 0,
+    };
+  }
+  deliveryBoy.wallet.currentBalance = Math.round(((deliveryBoy.wallet.currentBalance || 0) + charge) * 100) / 100;
+  deliveryBoy.wallet.totalEarned = Math.round(((deliveryBoy.wallet.totalEarned || 0) + charge) * 100) / 100;
+  if (!deliveryBoy.metrics) {
+    deliveryBoy.metrics = { completedDeliveries: 0 };
+  }
+  deliveryBoy.metrics.completedDeliveries = (deliveryBoy.metrics.completedDeliveries || 0) + 1;
+  await deliveryBoy.save();
+
+  await DeliveryEarningsLedger.create({
+    deliveryBoy: deliveryBoy._id,
+    order: refund.order,
+    refund: refund._id,
+    earningType: "RETURN_PICKUP",
+    paymentMethod: refund.originalPaymentMethod || "Cash on delivery",
+    basePay: charge,
+    distancePay: 0,
+    peakPay: 0,
+    customerTip: 0,
+    totalEarnings: charge,
+    settlementStatus: "PENDING",
+    idempotencyKey: `DELIV-EARN-RET-${refund._id}`,
+  }).catch((err) => {
+    console.error("   [DeliveryEarningsLedger Create Error]:", err.message);
+  });
+
+  // 3. Update Refund record
+  refund.pickup.pickupCharge = charge;
+  refund.pickup.isPickupChargeDebited = true;
+  refund.pickup.isDeliveryBoyPaid = true;
+  refund.pickup.pickupChargeTxRef = matchingRef;
+  await refund.save();
+
+  emitVendorWalletUpdate(vendor._id.toString(), vendor.wallet);
+
+  return {
+    success: true,
+    alreadyProcessed: false,
+    pickupCharge: charge,
+    matchingRef,
+    vendorBalance: vendor.wallet.currentBalance,
+    deliveryBoyBalance: deliveryBoy.wallet.currentBalance,
   };
 }

@@ -6,7 +6,11 @@ import {
   getMyRefunds,
   getVendorRefunds,
   vendorReviewRefund,
+  vendorAcknowledgeClaim,
   vendorDirectRefundPayout,
+  superAdminProcessOnlineRefund,
+  adminAssignReturnPickup,
+  deliveryBoySubmitReturnInspection,
   getRefundById,
 } from "../controllers/refundController.js";
 import { protect } from "../middleware/authMiddleware.js";
@@ -22,7 +26,15 @@ router.get("/my-refunds", getMyRefunds);
 // Vendor endpoints
 router.get("/vendor", getVendorRefunds);
 router.patch("/:id/vendor-review", vendorReviewRefund);
+router.patch("/:id/vendor-acknowledge", vendorAcknowledgeClaim);
 router.patch("/:id/vendor-direct-payout", vendorDirectRefundPayout);
+
+// Super Admin endpoints
+router.patch("/:id/superadmin-online-payout", superAdminProcessOnlineRefund);
+router.patch("/:id/assign-pickup", adminAssignReturnPickup);
+
+// Delivery Partner endpoints
+router.patch("/:id/delivery-inspection", deliveryBoySubmitReturnInspection);
 
 // Shared / Action endpoints
 router.patch("/:id/approve", approveRefund);

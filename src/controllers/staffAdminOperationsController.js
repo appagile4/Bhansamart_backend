@@ -1485,16 +1485,38 @@ export const reviewBrandAdmin = async (req, res, next) => {
 export const getRefundsQueueAdmin = async (req, res, next) => {
   try {
     const { isSuperAdmin, accessibleIds } = resolveStaffVendorScope(req);
-    const { status = "ALL", claimType, page = 1, limit = 20, vendorId } = req.query;
+    const { status = "ALL", claimType, page = 1, limit = 20, vendorId, refundType } = req.query;
 
-    const query = {};
+    const baseScopeQuery = {};
     if (vendorId && vendorId !== "all") {
       assertVendorAccessible(req, vendorId);
-      query.vendor = new mongoose.Types.ObjectId(vendorId);
+      baseScopeQuery.vendor = new mongoose.Types.ObjectId(vendorId);
     } else if (!isSuperAdmin) {
-      query.vendor = {
+      baseScopeQuery.vendor = {
         $in: (accessibleIds || []).map((id) => new mongoose.Types.ObjectId(id)),
       };
+    }
+
+    const query = { ...baseScopeQuery };
+
+    // Primary Tab Filter: Vendor Refund Requests (COD) vs My Refund Requests (Online, NOT COD)
+    const codMethods = ["Cash on delivery", "COD", "cash_on_delivery", "Cash On Delivery"];
+    const isCodCondition = {
+      $or: [
+        { isVendorFunded: true },
+        { originalPaymentMethod: { $in: codMethods } },
+        { originalPaymentMethod: { $regex: /cash|cod/i } },
+      ],
+    };
+    const isOnlineCondition = {
+      isVendorFunded: false,
+      originalPaymentMethod: { $nin: codMethods, $not: /cash|cod/i },
+    };
+
+    if (refundType === "vendor") {
+      Object.assign(query, isCodCondition);
+    } else if (refundType === "my" || refundType === "admin") {
+      Object.assign(query, isOnlineCondition);
     }
 
     if (status && status !== "ALL" && status !== "all") {
@@ -1505,7 +1527,16 @@ export const getRefundsQueueAdmin = async (req, res, next) => {
     }
 
     const skip = (Number(page) - 1) * Number(limit);
-    const [rawRefunds, total, pendingCount, approvedCount, completedCount, rejectedCount] = await Promise.all([
+    const [
+      rawRefunds,
+      total,
+      pendingCount,
+      approvedCount,
+      completedCount,
+      rejectedCount,
+      vendorRefundsCount,
+      myRefundsCount,
+    ] = await Promise.all([
       Refund.find(query)
         .populate("vendor", "businessDetails.businessName brandDetails.brandLogo")
         .populate("customer", "name phone email")
@@ -1524,11 +1555,20 @@ export const getRefundsQueueAdmin = async (req, res, next) => {
       Refund.countDocuments({ ...query, status: { $in: ["APPROVED", "STAFF_EXAMINING", "FORWARDED_TO_FINANCE", "RETURN_PICKUP_SCHEDULED", "RETURN_PICKED_UP", "RETURN_RECEIVED", "INSPECTED_PASSED"] } }),
       Refund.countDocuments({ ...query, status: "COMPLETED" }),
       Refund.countDocuments({ ...query, status: { $in: ["REJECTED", "VENDOR_REJECTED", "FAILED", "INSPECTED_FAILED"] } }),
+      Refund.countDocuments({
+        ...baseScopeQuery,
+        ...isCodCondition,
+      }),
+      Refund.countDocuments({
+        ...baseScopeQuery,
+        ...isOnlineCondition,
+      }),
     ]);
 
+    // Unmask full banking & payout details for Super Admin so they can pay back the customer
     const refunds = rawRefunds.map((r) => ({
       ...r,
-      customerPayoutDetails: maskCustomerPayoutDetails(r.customerPayoutDetails),
+      customerPayoutDetails: isSuperAdmin ? (r.customerPayoutDetails || {}) : maskCustomerPayoutDetails(r.customerPayoutDetails),
     }));
 
     res.status(200).json({
@@ -1540,6 +1580,8 @@ export const getRefundsQueueAdmin = async (req, res, next) => {
         approved: approvedCount,
         completed: completedCount,
         rejected: rejectedCount,
+        vendorCount: vendorRefundsCount,
+        myCount: myRefundsCount,
       },
       refunds,
       pagination: {
@@ -1555,6 +1597,15 @@ export const getRefundsQueueAdmin = async (req, res, next) => {
 
 export const staffExamineRefundAction = async (req, res, next) => {
   try {
+    if (req.user.role === "staffadmin") {
+      return next(
+        new AppError(
+          "Staff Admins are restricted to read-only monitoring and cannot examine, approve, or reject refund claims.",
+          403
+        )
+      );
+    }
+
     const { id } = req.params;
     const {
       notes = "",
@@ -1622,6 +1673,15 @@ export const staffExamineRefundAction = async (req, res, next) => {
 
 export const updateRefundPickupAction = async (req, res, next) => {
   try {
+    if (req.user.role === "staffadmin") {
+      return next(
+        new AppError(
+          "Staff Admins cannot assign or update pickup operations. Only Super Admin or authorized logistics can manage pickups.",
+          403
+        )
+      );
+    }
+
     const { id } = req.params;
     const { deliveryBoyId, pickupStatus, notes = "" } = req.body;
 
@@ -1673,6 +1733,15 @@ export const updateRefundPickupAction = async (req, res, next) => {
 
 export const recordRefundInspectionAction = async (req, res, next) => {
   try {
+    if (req.user.role === "staffadmin") {
+      return next(
+        new AppError(
+          "Staff Admins cannot submit inspection results. Return inspections are performed by assigned Delivery Partners or Super Admin.",
+          403
+        )
+      );
+    }
+
     const { id } = req.params;
     const { result, notes = "", proofImages = [] } = req.body;
 

@@ -71,8 +71,10 @@ const refundSchema = new mongoose.Schema(
         "CANCELLATION",
         "CANCEL_PRE_DISPATCH",
         "RETURN",
+        "REFUND",
         "RETURN_REFUND",
         "REPLACEMENT",
+        "EXCHANGE",
         "DEFECTIVE",
         "DEFECTIVE_CLAIM",
         "WRONG_ITEM",
@@ -191,6 +193,9 @@ const refundSchema = new mongoose.Schema(
         ref: "DeliveryBoy",
         default: null,
       },
+      otp: { type: String, default: "" },
+      otpExpiresAt: { type: Date, default: null },
+      isOtpVerified: { type: Boolean, default: false },
       status: {
         type: String,
         enum: [
@@ -209,6 +214,10 @@ const refundSchema = new mongoose.Schema(
       receivedAt: { type: Date, default: null },
       failureReason: { type: String, default: "" },
       notes: { type: String, default: "" },
+      pickupCharge: { type: Number, default: 50 },
+      isPickupChargeDebited: { type: Boolean, default: false },
+      isDeliveryBoyPaid: { type: Boolean, default: false },
+      pickupChargeTxRef: { type: String, default: "" },
     },
     // Item Inspection
     inspection: {
@@ -218,6 +227,20 @@ const refundSchema = new mongoose.Schema(
         enum: ["NOT_REQUIRED", "PENDING", "PASSED", "FAILED"],
         default: "NOT_REQUIRED",
       },
+      condition: {
+        type: String,
+        enum: ["", "INTACT", "DAMAGED", "OPEN_BOX", "DEFECTIVE", "WRONG_ITEM", "MISSING_PARTS"],
+        default: "",
+      },
+      missingAccessories: { type: String, default: "" },
+      visibleDamage: { type: String, default: "" },
+      quantityCollected: { type: Number, default: 0 },
+      location: { type: String, default: "" },
+      inspectedByBoy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "DeliveryBoy",
+        default: null,
+      },
       notes: { type: String, default: "" },
       inspectedBy: {
         type: mongoose.Schema.Types.ObjectId,
@@ -226,6 +249,26 @@ const refundSchema = new mongoose.Schema(
       },
       inspectedAt: { type: Date, default: null },
       proofImages: [{ type: String }],
+    },
+    // Exchange or Replacement Details
+    exchangeDetails: {
+      exchangeProductId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Product",
+        default: null,
+      },
+      exchangeProductName: { type: String, default: "" },
+      priceDifference: { type: Number, default: 0 },
+      fulfillmentStatus: {
+        type: String,
+        enum: ["NONE", "PENDING", "DISPATCHED", "DELIVERED"],
+        default: "NONE",
+      },
+      replacementOrderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Order",
+        default: null,
+      },
     },
     // Audit Timeline
     timeline: [
@@ -251,8 +294,16 @@ const refundSchema = new mongoose.Schema(
       accountNumber: { type: String, default: "" },
       bankName: { type: String, default: "" },
       accountHolderName: { type: String, default: "" },
+      ifscCode: { type: String, default: "" },
       payoutReference: { type: String, default: "" },
+      payoutProofImage: { type: String, default: "" },
       payoutCompletedAt: { type: Date, default: null },
+      processedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      processedByRole: { type: String, default: "" },
     },
     replacementOrder: {
       type: mongoose.Schema.Types.ObjectId,
@@ -332,8 +383,19 @@ export const maskCustomerPayoutDetails = (payoutDetails) => {
     }
   }
 
+  if (details.ifscCode && typeof details.ifscCode === "string") {
+    const clean = details.ifscCode.trim();
+    if (clean.length > 4) {
+      details.ifscCode = clean.slice(0, 4) + "****" + clean.slice(-2);
+    } else {
+      details.ifscCode = "****";
+    }
+  }
+
   return details;
 };
+
+refundSchema.statics.maskCustomerPayoutDetails = maskCustomerPayoutDetails;
 
 const Refund = mongoose.models.Refund || mongoose.model("Refund", refundSchema);
 

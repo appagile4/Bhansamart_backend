@@ -8,6 +8,7 @@ import {
   markArrivedAtCustomer,
   verifyDeliveryOtp,
   cancelActiveDelivery,
+  getAssignedReturnPickups,
 } from "../controllers/deliveryAssignmentController.js";
 import { protect, authorizeRoles } from "../middleware/authMiddleware.js";
 
@@ -17,6 +18,7 @@ router.use(protect);
 router.use(authorizeRoles("delivery_boy", "admin", "superadmin"));
 
 router.get("/active", getActiveAssignment);
+router.get("/return-pickups", getAssignedReturnPickups);
 router.post("/:assignmentId/accept", acceptAssignment);
 router.post("/:assignmentId/reject", rejectAssignment);
 router.post("/:orderId/arrived-store", markArrivedAtStore);

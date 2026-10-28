@@ -2,8 +2,10 @@ import Refund, { maskCustomerPayoutDetails } from "../models/Refund.js";
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
 import Vendor from "../models/Vendor.js";
+import DeliveryBoy from "../models/DeliveryBoy.js";
 import { AppError } from "../middleware/errorMiddleware.js";
-import { processOrderRefund } from "../services/financeLedgerService.js";
+import { processOrderRefund, processReturnPickupAccounting } from "../services/financeLedgerService.js";
+import { generateNumericOTP } from "../utils/generateOTP.js";
 import { emitOrderStatusUpdate, notifyStaffAdminsForVendor } from "../socket/socketManager.js";
 
 /**
@@ -239,6 +241,7 @@ export const requestRefund = async (req, res, next) => {
         accountNumber: customerPayoutDetails.accountNumber || "",
         bankName: customerPayoutDetails.bankName || "",
         accountHolderName: customerPayoutDetails.accountHolderName || "",
+        ifscCode: customerPayoutDetails.ifscCode || "",
       },
     });
 
@@ -382,6 +385,13 @@ export const vendorDirectRefundPayout = async (req, res, next) => {
       );
     }
 
+    // Strict rule: Vendor only refunds COD orders
+    if (!refund.isVendorFunded || (refund.originalPaymentMethod !== "Cash on delivery" && refund.originalPaymentMethod !== "COD")) {
+      return next(
+        new AppError("Vendors can only directly refund Cash on Delivery (COD) orders. Online payment refunds are managed by Super Admin.", 403)
+      );
+    }
+
     const order = await Order.findById(refund.order._id || refund.order);
     if (!order) {
       return next(new AppError("Associated order not found", 404));
@@ -392,6 +402,7 @@ export const vendorDirectRefundPayout = async (req, res, next) => {
 
     // Execute ledger refund (Vendor funded: no digital wallet deduction, zero commission reversal)
     await processOrderRefund({
+      refundId: refund._id,
       order,
       items: refund.items,
       refundAmount: refund.amount,
@@ -409,9 +420,11 @@ export const vendorDirectRefundPayout = async (req, res, next) => {
       idempotencyKey: `VEND-PAY-${refund._id}-${cleanRef}`,
     });
 
-    refund.status = "COMPLETED";
-    refund.isVendorFunded = true;
-    refund.vendorPaymentDetails = {
+    // Reload refund to ensure version concurrency safety
+    const updatedRefund = await Refund.findById(refund._id);
+    updatedRefund.status = "COMPLETED";
+    updatedRefund.isVendorFunded = true;
+    updatedRefund.vendorPaymentDetails = {
       paymentMethod,
       transactionReference: cleanRef,
       proofImage,
@@ -419,19 +432,19 @@ export const vendorDirectRefundPayout = async (req, res, next) => {
       confirmedByVendor: true,
       notes,
     };
-    refund.timeline.push({
+    updatedRefund.timeline.push({
       status: "COMPLETED",
       actorRole: "vendor",
       actorName: vendor.businessDetails?.businessName || req.user.name,
       notes: `Vendor sent direct refund of NPR ${refund.amount} via ${paymentMethod}. Reference: ${cleanRef}`,
       timestamp: now,
     });
-    await refund.save();
+    await updatedRefund.save();
 
     // Real-time alerts
     emitOrderStatusUpdate(order._id.toString(), order.customer.toString(), {
       ...order.toObject(),
-      refundDetails: refund.toObject(),
+      refundDetails: updatedRefund.toObject(),
     });
 
     await notifyStaffAdminsForVendor({
@@ -457,10 +470,360 @@ export const vendorDirectRefundPayout = async (req, res, next) => {
   }
 };
 
+/**
+ * @desc    Vendor acknowledges claim and records planned refund
+ * @route   PATCH /api/refunds/:id/vendor-acknowledge
+ * @access  Private (Vendor)
+ */
+export const vendorAcknowledgeClaim = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { notes = "" } = req.body;
+
+    const refund = await Refund.findById(id).populate("order");
+    if (!refund) {
+      return next(new AppError("Refund request not found", 404));
+    }
+
+    const vendor = await Vendor.findOne({ userId: req.user._id });
+    if (!vendor || vendor._id.toString() !== refund.vendor.toString()) {
+      return next(new AppError("Unauthorized. Only the responsible vendor can acknowledge this claim.", 403));
+    }
+
+    refund.vendorReview = {
+      decision: "ACCEPTED",
+      notes: notes || "Vendor acknowledged claim.",
+      respondedAt: new Date(),
+    };
+
+    if (refund.isVendorFunded) {
+      refund.status = "APPROVED";
+    } else {
+      refund.status = "STAFF_EXAMINING";
+    }
+
+    refund.timeline.push({
+      status: refund.status,
+      actorRole: "vendor",
+      actorName: vendor.businessDetails?.businessName || req.user.name,
+      notes: notes || `Vendor acknowledged claim: ${refund.status}`,
+      timestamp: new Date(),
+    });
+
+    await refund.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Claim acknowledged by vendor. Status: ${refund.status}`,
+      refund,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Super Admin executes or marks online payment refund
+ * @route   PATCH /api/refunds/:id/superadmin-online-payout
+ * @access  Private (Superadmin only)
+ */
+export const superAdminProcessOnlineRefund = async (req, res, next) => {
+  try {
+    if (req.user.role !== "superadmin") {
+      return next(new AppError("Only Super Admin is authorized to process online payment refunds.", 403));
+    }
+
+    const { id } = req.params;
+    const {
+      payoutReference,
+      payoutProofImage = "",
+      status = "COMPLETED", // COMPLETED | PROCESSING
+      notes = "",
+    } = req.body;
+
+    const refund = await Refund.findById(id).populate("order vendor");
+    if (!refund) {
+      return next(new AppError("Refund record not found", 404));
+    }
+
+    if (refund.isVendorFunded) {
+      return next(new AppError("This is a COD order. The responsible vendor must refund the customer directly.", 400));
+    }
+
+    if (refund.status === "COMPLETED") {
+      return next(new AppError("This refund has already been completed.", 400));
+    }
+
+    const now = new Date();
+    const cleanRef = (payoutReference || "").trim() || `ONL-REF-${Date.now()}`;
+
+    if (status === "PROCESSING") {
+      refund.status = "PROCESSING";
+      refund.customerPayoutDetails.payoutReference = cleanRef;
+      refund.customerPayoutDetails.processedBy = req.user._id;
+      refund.customerPayoutDetails.processedByRole = "superadmin";
+      refund.timeline.push({
+        status: "PROCESSING",
+        actorRole: "superadmin",
+        actorName: req.user.name || "Super Admin",
+        notes: notes || `Super Admin initiated online refund payout. Reference: ${cleanRef}`,
+        timestamp: now,
+      });
+      await refund.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Online refund marked as processing.",
+        refund,
+      });
+    }
+
+    // Process actual ledger settlement with Super Admin commission preserved intact
+    await processOrderRefund({
+      refundId: refund._id,
+      order: refund.order,
+      items: refund.items,
+      refundAmount: refund.amount,
+      reason: refund.reason,
+      description: refund.description,
+      proofImages: refund.proofImages,
+      claimType: refund.claimType,
+      customerPayoutDetails: {
+        ...refund.customerPayoutDetails,
+        payoutReference: cleanRef,
+        payoutProofImage,
+        payoutCompletedAt: now,
+        processedBy: req.user._id,
+        processedByRole: "superadmin",
+      },
+      reviewedBy: req.user._id,
+      idempotencyKey: `SUPER-ONL-PAY-${refund._id}-${cleanRef}`,
+    });
+
+    // Reload refund to ensure version concurrency safety
+    const updatedRefund = await Refund.findById(refund._id);
+    updatedRefund.status = "COMPLETED";
+    updatedRefund.customerPayoutDetails.payoutReference = cleanRef;
+    updatedRefund.customerPayoutDetails.payoutProofImage = payoutProofImage;
+    updatedRefund.customerPayoutDetails.payoutCompletedAt = now;
+    updatedRefund.customerPayoutDetails.processedBy = req.user._id;
+    updatedRefund.customerPayoutDetails.processedByRole = "superadmin";
+
+    updatedRefund.timeline.push({
+      status: "COMPLETED",
+      actorRole: "superadmin",
+      actorName: req.user.name || "Super Admin",
+      notes: notes || `Super Admin executed online refund of NPR ${refund.amount}. Reference: ${cleanRef}`,
+      timestamp: now,
+    });
+    await updatedRefund.save();
+
+    emitOrderStatusUpdate(refund.order._id.toString(), refund.customer.toString(), {
+      ...(refund.order.toObject ? refund.order.toObject() : refund.order),
+      refundDetails: updatedRefund.toObject ? updatedRefund.toObject() : updatedRefund,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Online refund of NPR ${refund.amount} completed successfully. Reference: ${cleanRef}`,
+      refund,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Super Admin assigns a Delivery Partner for return pickup and generates OTP
+ * @route   PATCH /api/refunds/:id/assign-pickup
+ * @access  Private (Superadmin only)
+ */
+export const adminAssignReturnPickup = async (req, res, next) => {
+  try {
+    if (req.user.role !== "superadmin") {
+      return next(new AppError("Only Super Admin can assign delivery partners for return pickups.", 403));
+    }
+
+    const { id } = req.params;
+    const { deliveryBoyId, notes = "" } = req.body;
+
+    if (!deliveryBoyId) {
+      return next(new AppError("Delivery partner ID is required", 400));
+    }
+
+    const refund = await Refund.findById(id).populate("vendor order");
+    if (!refund) {
+      return next(new AppError("Claim not found", 404));
+    }
+
+    const deliveryBoy = await DeliveryBoy.findById(deliveryBoyId);
+    if (!deliveryBoy) {
+      return next(new AppError("Delivery partner not found", 404));
+    }
+
+    // Generate 4-digit numeric OTP for customer pickup verification
+    const pickupOtp = generateNumericOTP(4);
+
+    refund.pickup.required = true;
+    refund.pickup.deliveryBoy = deliveryBoy._id;
+    refund.pickup.otp = pickupOtp;
+    refund.pickup.otpExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    refund.pickup.isOtpVerified = false;
+    refund.pickup.status = "ASSIGNED";
+    refund.pickup.scheduledAt = new Date();
+    refund.pickup.notes = notes;
+    refund.status = "RETURN_PICKUP_SCHEDULED";
+
+    refund.timeline.push({
+      status: "RETURN_PICKUP_SCHEDULED",
+      actorRole: "superadmin",
+      actorName: req.user.name || "Super Admin",
+      notes: `Assigned reverse pickup to partner ${deliveryBoy.fullName || deliveryBoy.name}. Verification OTP generated.`,
+      timestamp: new Date(),
+    });
+
+    await refund.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Return pickup assigned to ${deliveryBoy.fullName}. Verification OTP: ${pickupOtp}`,
+      refund,
+      pickupOtp,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Delivery Partner submits return inspection report and verifies OTP
+ * @route   PATCH /api/refunds/:id/delivery-inspection
+ * @access  Private (Assigned Delivery Partner or Super Admin)
+ */
+export const deliveryBoySubmitReturnInspection = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const {
+      otp,
+      condition = "INTACT",
+      missingAccessories = "",
+      visibleDamage = "",
+      quantityCollected = 1,
+      location = "",
+      proofImages = [],
+      notes = "",
+      result = "PASSED",
+    } = req.body;
+
+    const refund = await Refund.findById(id).populate("vendor order");
+    if (!refund) {
+      return next(new AppError("Claim not found", 404));
+    }
+
+    // Authenticate: delivery boy or superadmin
+    let isAuthorized = req.user.role === "superadmin";
+    let deliveryBoy = null;
+    if (!isAuthorized) {
+      deliveryBoy = await DeliveryBoy.findOne({ user: req.user._id });
+      if (
+        deliveryBoy &&
+        refund.pickup?.deliveryBoy &&
+        refund.pickup.deliveryBoy.toString() === deliveryBoy._id.toString()
+      ) {
+        isAuthorized = true;
+      }
+    } else if (refund.pickup?.deliveryBoy) {
+      deliveryBoy = await DeliveryBoy.findById(refund.pickup.deliveryBoy);
+    }
+
+    if (!isAuthorized) {
+      return next(new AppError("Unauthorized. You are not the assigned delivery partner for this return pickup.", 403));
+    }
+
+    // Verify OTP if required
+    if (refund.pickup?.otp) {
+      if (!otp || String(otp).trim() !== String(refund.pickup.otp).trim()) {
+        return next(new AppError("Invalid pickup verification OTP. Please ask customer for the correct OTP.", 400));
+      }
+      refund.pickup.isOtpVerified = true;
+    }
+
+    const now = new Date();
+
+    // Record inspection report
+    refund.inspection = {
+      required: true,
+      result: result === "PASSED" ? "PASSED" : "FAILED",
+      condition,
+      missingAccessories,
+      visibleDamage,
+      quantityCollected: Number(quantityCollected) || 1,
+      location,
+      proofImages: Array.isArray(proofImages) ? proofImages : [],
+      notes,
+      inspectedByBoy: deliveryBoy?._id || null,
+      inspectedBy: req.user._id,
+      inspectedAt: now,
+    };
+
+    refund.pickup.status = "RECEIVED_AT_VENDOR";
+    refund.pickup.pickedUpAt = now;
+    refund.pickup.receivedAt = now;
+    refund.status = result === "PASSED" ? "INSPECTED_PASSED" : "INSPECTED_FAILED";
+
+    refund.timeline.push({
+      status: refund.status,
+      actorRole: "delivery_partner",
+      actorName: deliveryBoy?.fullName || req.user.name,
+      notes: `Return pickup inspection completed (${result}). Condition: ${condition}. Collected: ${quantityCollected}. Notes: ${notes}`,
+      timestamp: now,
+    });
+
+    await refund.save();
+
+    // Process Return Pickup Accounting: Deduct NPR 50 from Vendor wallet, Credit NPR 50 to Delivery Boy
+    if (deliveryBoy) {
+      await processReturnPickupAccounting({
+        refundId: refund._id,
+        deliveryBoyId: deliveryBoy._id,
+        vendorId: refund.vendor._id || refund.vendor,
+        pickupCharge: 50,
+      });
+    }
+
+    // Emit real-time notification to Vendor and Super Admin
+    await notifyStaffAdminsForVendor({
+      vendorId: refund.vendor._id || refund.vendor,
+      eventType: "staff_refund:inspected",
+      title: `Return Package Inspected (${result})`,
+      message: `Delivery partner submitted return report for #${refund.refundNumber}. Product condition: ${condition}.`,
+      data: {
+        refundId: refund._id,
+        refundNumber: refund.refundNumber,
+        result,
+        condition,
+        proofImages,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Return pickup inspection completed successfully. Status: ${refund.status}`,
+      refund,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const approveRefund = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { adminNotes, customerPayoutDetails } = req.body;
+
+    if (req.user.role === "staffadmin") {
+      return next(new AppError("Staff Admins are restricted to read-only monitoring and cannot approve refund claims.", 403));
+    }
 
     const refund = await Refund.findById(id).populate("order");
     if (!refund) {
@@ -476,17 +839,20 @@ export const approveRefund = async (req, res, next) => {
       return next(new AppError("Associated order not found", 404));
     }
 
-    // Authorize: Admin or store vendor
-    let isAuthorized = req.user.role === "admin" || req.user.role === "superadmin";
-    if (!isAuthorized) {
-      const vendor = await Vendor.findOne({ userId: req.user._id });
-      if (vendor && vendor._id.toString() === refund.vendor.toString()) {
-        isAuthorized = true;
-      }
-    }
+    const isCod = order.paymentMethod === "Cash on delivery" || order.paymentMethod === "COD";
 
-    if (!isAuthorized) {
-      return next(new AppError("Unauthorized to approve this refund", 403));
+    // Strict authority checks:
+    // For COD: Responsible Vendor pays customer directly. Super Admin monitors but does not pay on behalf of vendor.
+    if (isCod) {
+      const vendor = await Vendor.findOne({ userId: req.user._id });
+      if (!vendor || vendor._id.toString() !== refund.vendor.toString()) {
+        return next(new AppError("Only the responsible store vendor can approve and refund Cash on Delivery (COD) orders directly.", 403));
+      }
+    } else {
+      // For Online payment: Super Admin processes refund.
+      if (req.user.role !== "superadmin") {
+        return next(new AppError("Only Super Admin can approve and execute online payment refunds.", 403));
+      }
     }
 
     const payoutInfo = customerPayoutDetails || refund.customerPayoutDetails || {};
