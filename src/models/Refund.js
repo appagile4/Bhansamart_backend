@@ -134,9 +134,29 @@ const refundSchema = new mongoose.Schema(
         "RETURN_RECEIVED",
         "INSPECTED_PASSED",
         "INSPECTED_FAILED",
+        "VENDOR_PAID",
       ],
       default: "REQUESTED",
       index: true,
+    },
+    // Indicates if this refund is funded directly by the vendor (e.g. for COD orders)
+    isVendorFunded: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    // Vendor Direct Payment Confirmation for COD Refunds
+    vendorPaymentDetails: {
+      paymentMethod: {
+        type: String,
+        enum: ["UPI", "BANK_TRANSFER", "CASH", "DIRECT_STORE_PAYOUT"],
+        default: "UPI",
+      },
+      transactionReference: { type: String, default: "" },
+      proofImage: { type: String, default: "" },
+      paidAt: { type: Date, default: null },
+      confirmedByVendor: { type: Boolean, default: false },
+      notes: { type: String, default: "" },
     },
     // Vendor Initial Review
     vendorReview: {
@@ -287,6 +307,32 @@ refundSchema.statics.generateRefundNumber = async function () {
   }
 
   return refundNumber;
+};
+
+/**
+ * Mask sensitive customer payout information (banking / UPI) for safe display in portals
+ */
+export const maskCustomerPayoutDetails = (payoutDetails) => {
+  if (!payoutDetails) return {};
+  const details = { ...payoutDetails };
+
+  if (details.accountNumber && typeof details.accountNumber === "string") {
+    const clean = details.accountNumber.trim();
+    if (clean.length > 4) {
+      details.accountNumber = "********" + clean.slice(-4);
+    } else {
+      details.accountNumber = "********";
+    }
+  }
+
+  if (details.upiId && typeof details.upiId === "string") {
+    const parts = details.upiId.split("@");
+    if (parts.length === 2 && parts[0].length > 3) {
+      details.upiId = `${parts[0].slice(0, 2)}***${parts[0].slice(-1)}@${parts[1]}`;
+    }
+  }
+
+  return details;
 };
 
 const Refund = mongoose.models.Refund || mongoose.model("Refund", refundSchema);

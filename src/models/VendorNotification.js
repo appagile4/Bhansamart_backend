@@ -21,6 +21,7 @@ const vendorNotificationSchema = new mongoose.Schema(
         "PAYMENT_RECEIVED",
         "COD_COLLECTED",
         "COD_SUBMITTED",
+        "COD_DISCREPANCY",
         "WITHDRAWAL_UPDATE",
         "REFUND_PROCESSED",
         "REFUND_REQUESTED",

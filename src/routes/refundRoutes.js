@@ -6,6 +6,7 @@ import {
   getMyRefunds,
   getVendorRefunds,
   vendorReviewRefund,
+  vendorDirectRefundPayout,
   getRefundById,
 } from "../controllers/refundController.js";
 import { protect } from "../middleware/authMiddleware.js";
@@ -21,6 +22,7 @@ router.get("/my-refunds", getMyRefunds);
 // Vendor endpoints
 router.get("/vendor", getVendorRefunds);
 router.patch("/:id/vendor-review", vendorReviewRefund);
+router.patch("/:id/vendor-direct-payout", vendorDirectRefundPayout);
 
 // Shared / Action endpoints
 router.patch("/:id/approve", approveRefund);

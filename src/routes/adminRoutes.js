@@ -131,6 +131,7 @@ router.get("/map/live-data", getLiveOperationalMapData);
 router.get("/finance/transactions", requireSuperadminOnly, getAllFinancialTransactions);
 router.get("/finance/withdrawals", requireSuperadminOnly, getAllWithdrawalsAdmin);
 router.post("/finance/withdrawals/:id/review", requireSuperadminOnly, reviewWithdrawalAdmin);
+router.get("/finance/cod-reporting", requireSuperadminOnly, getDeliveryCodReconciliationAdmin);
 
 // 11. Platform Bank Account & Checkout Display Configuration (Superadmin Only)
 router.get("/platform-payment/config", requireSuperadminOnly, getPlatformPaymentConfigAdmin);

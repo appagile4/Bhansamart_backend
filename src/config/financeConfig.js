@@ -9,6 +9,9 @@ export const FINANCE_CONFIG = {
   // Superadmin fixed commission rate: 1.5%
   SUPERADMIN_COMMISSION_RATE: 0.015,
 
+  // Configured delivery earning for COD deliveries (₹30)
+  DEFAULT_COD_DELIVERY_EARNING: 30,
+
   // Default handling charge
   DEFAULT_HANDLING_CHARGE: 30,
 

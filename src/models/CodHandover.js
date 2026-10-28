@@ -46,6 +46,35 @@ const codHandoverSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    confirmedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    status: {
+      type: String,
+      enum: [
+        "HANDOVER_PENDING",
+        "HANDED_OVER",
+        "VENDOR_CONFIRMED",
+        "DISCREPANCY_REPORTED",
+      ],
+      default: "VENDOR_CONFIRMED",
+      index: true,
+    },
+    discrepancy: {
+      hasDiscrepancy: { type: Boolean, default: false },
+      expectedAmount: { type: Number, default: 0 },
+      submittedAmount: { type: Number, default: 0 },
+      shortfall: { type: Number, default: 0 },
+      reason: { type: String, default: "" },
+      reportedAt: { type: Date, default: null },
+      reportedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+    },
     paymentMode: {
       type: String,
       enum: ["CASH", "UPI", "BANK_TRANSFER"],
@@ -59,6 +88,19 @@ const codHandoverSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    auditHistory: [
+      {
+        action: { type: String, required: true },
+        performedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          default: null,
+        },
+        role: { type: String, default: "" },
+        notes: { type: String, default: "" },
+        timestamp: { type: Date, default: Date.now },
+      },
+    ],
   },
   { timestamps: true }
 );

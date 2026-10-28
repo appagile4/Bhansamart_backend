@@ -3,7 +3,7 @@ import User from "../models/User.js";
 import Vendor from "../models/Vendor.js";
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
-import Refund from "../models/Refund.js";
+import Refund, { maskCustomerPayoutDetails } from "../models/Refund.js";
 import Brand from "../models/Brand.js";
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import DeliveryAssignment from "../models/DeliveryAssignment.js";
@@ -1019,14 +1019,17 @@ export const getDeliveryCodReconciliationAdmin = async (req, res, next) => {
     // 2. Fetch Handover records for matched delivery boys & vendors
     const handovers = await CodHandover.find(vendorFilter).lean();
 
-    // 3. Assemble Ledger Reconciliation
+    // 3. Assemble Detailed Ledger Reconciliation
     const reconciliation = await Promise.all(
       deliveredCodOrders
         .filter((d) => d._id && d._id.deliveryBoy)
         .map(async (row) => {
-          const [dboy, vend] = await Promise.all([
+          const [dboy, vend, groupOrders] = await Promise.all([
             DeliveryBoy.findById(row._id.deliveryBoy).select("fullName phone availability").lean(),
             Vendor.findById(row._id.vendor).select("businessDetails.businessName").lean(),
+            Order.find({ _id: { $in: row.orderIds } })
+              .select("orderNumber totalAmount codDetails deliveredAt")
+              .lean(),
           ]);
 
           const matchingHandovers = handovers.filter(
@@ -1041,6 +1044,23 @@ export const getDeliveryCodReconciliationAdmin = async (req, res, next) => {
           );
 
           const expectedCod = row.expectedAmount || 0;
+          const totalCollected = groupOrders.reduce(
+            (sum, o) => sum + (o.codDetails?.amountCollected || o.codDetails?.cashCollectedAmount || o.totalAmount || 0),
+            0
+          );
+          const totalHandedOver = groupOrders.reduce(
+            (sum, o) => sum + (o.codDetails?.amountHandedOver || (o.codDetails?.cashSubmittedToVendor ? o.totalAmount : 0)),
+            0
+          );
+          const totalVendorConfirmed = groupOrders.reduce(
+            (sum, o) => sum + (o.codDetails?.vendorConfirmed ? (o.codDetails?.amountHandedOver || o.totalAmount) : 0),
+            0
+          );
+
+          const discrepancies = groupOrders.filter(
+            (o) => o.codDetails?.status === "DISCREPANCY_REPORTED" || o.codDetails?.discrepancy?.hasDiscrepancy
+          );
+
           const outstanding = Math.max(0, expectedCod - totalSubmitted);
           const isDisputed = outstanding > 0 && row.ordersCount > 2;
 
@@ -1052,22 +1072,63 @@ export const getDeliveryCodReconciliationAdmin = async (req, res, next) => {
             vendorName: vend?.businessDetails?.businessName || "Store",
             ordersCount: row.ordersCount,
             expectedCod,
+            totalCollected,
+            totalHandedOver,
+            totalVendorConfirmed,
             totalSubmitted,
             outstanding,
+            discrepanciesCount: discrepancies.length,
+            discrepancies: discrepancies.map((d) => ({
+              orderId: d._id,
+              orderNumber: d.orderNumber,
+              expectedAmount: d.codDetails?.discrepancy?.expectedAmount || d.totalAmount,
+              actualAmount: d.codDetails?.discrepancy?.actualAmount || 0,
+              shortfall: d.codDetails?.discrepancy?.shortfall || 0,
+              reason: d.codDetails?.discrepancy?.reason || "",
+              reportedAt: d.codDetails?.discrepancy?.reportedAt,
+            })),
             reconciliationStatus:
-              outstanding === 0
-                ? "RECONCILED"
-                : isDisputed
-                  ? "MISMATCH_DISPUTE"
-                  : "AWAITING_HANDOVER",
+              discrepancies.length > 0
+                ? "DISCREPANCY_REPORTED"
+                : outstanding === 0
+                  ? "RECONCILED"
+                  : isDisputed
+                    ? "MISMATCH_DISPUTE"
+                    : "AWAITING_HANDOVER",
             handoversCount: matchingHandovers.length,
             recentReceipts: matchingHandovers.slice(-3).map((h) => h.receiptNumber),
+            orders: groupOrders.map((o) => ({
+              orderId: o._id,
+              orderNumber: o.orderNumber,
+              amountDue: o.codDetails?.amountDue || o.totalAmount,
+              amountCollected: o.codDetails?.amountCollected || o.codDetails?.cashCollectedAmount || 0,
+              amountHandedOver: o.codDetails?.amountHandedOver || 0,
+              status: o.codDetails?.status || "COD_PENDING",
+              cashCollectedAt: o.codDetails?.cashCollectedAt || o.deliveredAt,
+              cashSubmittedAt: o.codDetails?.cashSubmittedAt,
+              vendorConfirmed: o.codDetails?.vendorConfirmed || false,
+              vendorConfirmedAt: o.codDetails?.vendorConfirmedAt,
+              discrepancy: o.codDetails?.discrepancy,
+              auditHistory: o.codDetails?.auditHistory,
+            })),
           };
         })
     );
 
+    const summary = {
+      totalGroups: reconciliation.length,
+      totalOrders: deliveredCodOrders.reduce((acc, r) => acc + (r.ordersCount || 0), 0),
+      totalExpectedCod: reconciliation.reduce((acc, r) => acc + (r.expectedCod || 0), 0),
+      totalCollected: reconciliation.reduce((acc, r) => acc + (r.totalCollected || 0), 0),
+      totalHandedOver: reconciliation.reduce((acc, r) => acc + (r.totalHandedOver || 0), 0),
+      totalVendorConfirmed: reconciliation.reduce((acc, r) => acc + (r.totalVendorConfirmed || 0), 0),
+      totalOutstanding: reconciliation.reduce((acc, r) => acc + (r.outstanding || 0), 0),
+      totalDiscrepancies: reconciliation.reduce((acc, r) => acc + (r.discrepanciesCount || 0), 0),
+    };
+
     res.status(200).json({
       success: true,
+      summary,
       reconciliation,
     });
   } catch (error) {
@@ -1363,13 +1424,13 @@ export const getRefundsQueueAdmin = async (req, res, next) => {
     }
 
     const skip = (Number(page) - 1) * Number(limit);
-    const [refunds, total] = await Promise.all([
+    const [rawRefunds, total, pendingCount, approvedCount, completedCount, rejectedCount] = await Promise.all([
       Refund.find(query)
         .populate("vendor", "businessDetails.businessName brandDetails.brandLogo")
         .populate("customer", "name phone email")
         .populate({
           path: "order",
-          select: "orderNumber totalAmount paymentMethod orderStatus items shippingAddress",
+          select: "orderNumber totalAmount paymentMethod orderStatus items shippingAddress codDetails",
         })
         .populate("pickup.deliveryBoy", "fullName phone availability")
         .populate("staffReview.reviewer", "name email")
@@ -1378,11 +1439,27 @@ export const getRefundsQueueAdmin = async (req, res, next) => {
         .limit(Number(limit))
         .lean(),
       Refund.countDocuments(query),
+      Refund.countDocuments({ ...query, status: { $in: ["REQUESTED", "VENDOR_REVIEW", "VENDOR_INFO_REQUIRED"] } }),
+      Refund.countDocuments({ ...query, status: { $in: ["APPROVED", "STAFF_EXAMINING", "FORWARDED_TO_FINANCE", "RETURN_PICKUP_SCHEDULED", "RETURN_PICKED_UP", "RETURN_RECEIVED", "INSPECTED_PASSED"] } }),
+      Refund.countDocuments({ ...query, status: "COMPLETED" }),
+      Refund.countDocuments({ ...query, status: { $in: ["REJECTED", "VENDOR_REJECTED", "FAILED", "INSPECTED_FAILED"] } }),
     ]);
+
+    const refunds = rawRefunds.map((r) => ({
+      ...r,
+      customerPayoutDetails: maskCustomerPayoutDetails(r.customerPayoutDetails),
+    }));
 
     res.status(200).json({
       success: true,
       total,
+      summary: {
+        total,
+        pending: pendingCount,
+        approved: approvedCount,
+        completed: completedCount,
+        rejected: rejectedCount,
+      },
       refunds,
       pagination: {
         page: Number(page),

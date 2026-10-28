@@ -1,4 +1,4 @@
-import Refund from "../models/Refund.js";
+import Refund, { maskCustomerPayoutDetails } from "../models/Refund.js";
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
 import Vendor from "../models/Vendor.js";
@@ -49,7 +49,7 @@ export const requestRefund = async (req, res, next) => {
     // Check for duplicate pending requests on this order
     const pendingExisting = await Refund.findOne({
       order: order._id,
-      status: { $in: ["REQUESTED", "APPROVED", "PROCESSING"] },
+      status: { $in: ["REQUESTED", "APPROVED", "PROCESSING", "VENDOR_REVIEW", "STAFF_EXAMINING"] },
     });
     if (pendingExisting) {
       return next(
@@ -58,6 +58,34 @@ export const requestRefund = async (req, res, next) => {
           400
         )
       );
+    }
+
+    // Verify COD delivery and cash collection for delivered COD orders
+    const isCod = order.paymentMethod === "Cash on delivery";
+    if (isCod && claimType !== "CANCELLATION") {
+      if (order.orderStatus !== "DELIVERED" || !order.codDetails?.cashCollectedByRider) {
+        return next(
+          new AppError(
+            "Refund cannot be requested for a Cash on Delivery order that has not been successfully delivered and cash collected.",
+            400
+          )
+        );
+      }
+    }
+
+    // Verify return window if delivered
+    if (order.deliveredAt && claimType !== "CANCELLATION") {
+      const deliveredDate = new Date(order.deliveredAt);
+      const returnWindowDays = order.items?.[0]?.returnWindowDays || 7;
+      const windowMs = returnWindowDays * 24 * 60 * 60 * 1000;
+      if (Date.now() - deliveredDate.getTime() > windowMs) {
+        return next(
+          new AppError(
+            `Return window of ${returnWindowDays} days has expired for this delivered order.`,
+            400
+          )
+        );
+      }
     }
 
     // Calculate claim items and total refundable amount
@@ -191,6 +219,7 @@ export const requestRefund = async (req, res, next) => {
       items: targetItems,
       amount: claimAmount,
       originalPaymentMethod: order.paymentMethod,
+      isVendorFunded: isCod,
       reason: reason.trim(),
       description: description || "",
       proofImages,
@@ -311,6 +340,117 @@ export const vendorReviewRefund = async (req, res, next) => {
       success: true,
       message: `Vendor review submitted: ${decision}`,
       refund,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Vendor submits direct customer payout confirmation for an approved COD refund
+ * @route   PATCH /api/refunds/:id/vendor-direct-payout
+ * @access  Private (Vendor)
+ */
+export const vendorDirectRefundPayout = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const {
+      paymentMethod = "UPI",
+      transactionReference,
+      proofImage = "",
+      notes = "",
+    } = req.body;
+
+    if (!transactionReference || !transactionReference.trim()) {
+      return next(new AppError("Payment transaction reference / UTR is required", 400));
+    }
+
+    const refund = await Refund.findById(id).populate("order");
+    if (!refund) {
+      return next(new AppError("Refund request not found", 404));
+    }
+
+    if (refund.status === "COMPLETED") {
+      return next(new AppError("This refund has already been completed.", 400));
+    }
+
+    // Verify vendor ownership
+    const vendor = await Vendor.findOne({ userId: req.user._id });
+    if (!vendor || vendor._id.toString() !== refund.vendor.toString()) {
+      return next(
+        new AppError("Unauthorized. Only the responsible store vendor can execute direct refund payout.", 403)
+      );
+    }
+
+    const order = await Order.findById(refund.order._id || refund.order);
+    if (!order) {
+      return next(new AppError("Associated order not found", 404));
+    }
+
+    const now = new Date();
+    const cleanRef = transactionReference.trim();
+
+    // Execute ledger refund (Vendor funded: no digital wallet deduction, zero commission reversal)
+    await processOrderRefund({
+      order,
+      items: refund.items,
+      refundAmount: refund.amount,
+      reason: refund.reason,
+      description: refund.description,
+      proofImages: refund.proofImages,
+      claimType: refund.claimType,
+      customerPayoutDetails: {
+        ...refund.customerPayoutDetails,
+        method: paymentMethod,
+        payoutReference: cleanRef,
+        payoutCompletedAt: now,
+      },
+      reviewedBy: req.user._id,
+      idempotencyKey: `VEND-PAY-${refund._id}-${cleanRef}`,
+    });
+
+    refund.status = "COMPLETED";
+    refund.isVendorFunded = true;
+    refund.vendorPaymentDetails = {
+      paymentMethod,
+      transactionReference: cleanRef,
+      proofImage,
+      paidAt: now,
+      confirmedByVendor: true,
+      notes,
+    };
+    refund.timeline.push({
+      status: "COMPLETED",
+      actorRole: "vendor",
+      actorName: vendor.businessDetails?.businessName || req.user.name,
+      notes: `Vendor sent direct refund of NPR ${refund.amount} via ${paymentMethod}. Reference: ${cleanRef}`,
+      timestamp: now,
+    });
+    await refund.save();
+
+    // Real-time alerts
+    emitOrderStatusUpdate(order._id.toString(), order.customer.toString(), {
+      ...order.toObject(),
+      refundDetails: refund.toObject(),
+    });
+
+    await notifyStaffAdminsForVendor({
+      vendorId: vendor._id,
+      eventType: "staff_refund:vendor_paid",
+      title: "Vendor Direct Refund Completed",
+      message: `Store ${vendor.businessDetails?.businessName} paid direct refund of NPR ${refund.amount} to customer. Reference: ${cleanRef}.`,
+      data: {
+        refundId: refund._id,
+        orderId: order._id,
+        amount: refund.amount,
+        transactionReference: cleanRef,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Direct customer refund confirmed and marked as completed.",
+      data: refund,
     });
   } catch (error) {
     next(error);
@@ -506,16 +646,41 @@ export const getVendorRefunds = async (req, res, next) => {
       query.status = status;
     }
 
-    const refunds = await Refund.find(query)
-      .populate("order", "orderNumber totalAmount paymentMethod orderStatus")
+    const rawRefunds = await Refund.find(query)
+      .populate("order", "orderNumber totalAmount paymentMethod orderStatus codDetails")
       .populate("customer", "name phone email")
       .sort({ createdAt: -1 })
       .lean();
 
+    // Mask sensitive customer payout details and organize into distinct sections
+    const maskedRefunds = rawRefunds.map((r) => ({
+      ...r,
+      customerPayoutDetails: maskCustomerPayoutDetails(r.customerPayoutDetails),
+    }));
+
+    const pendingReview = maskedRefunds.filter((r) =>
+      ["REQUESTED", "VENDOR_REVIEW", "VENDOR_INFO_REQUIRED"].includes(r.status)
+    );
+    const approvedObligations = maskedRefunds.filter((r) =>
+      ["APPROVED", "STAFF_EXAMINING", "FORWARDED_TO_FINANCE", "RETURN_PICKUP_SCHEDULED", "RETURN_PICKED_UP", "RETURN_RECEIVED", "INSPECTED_PASSED"].includes(r.status)
+    );
+    const completedVendorRefunds = maskedRefunds.filter((r) =>
+      r.status === "COMPLETED"
+    );
+    const rejectedRefunds = maskedRefunds.filter((r) =>
+      ["REJECTED", "VENDOR_REJECTED", "FAILED", "INSPECTED_FAILED"].includes(r.status)
+    );
+
     res.status(200).json({
       success: true,
-      count: refunds.length,
-      data: refunds,
+      count: maskedRefunds.length,
+      sections: {
+        pendingReview,
+        approvedObligations,
+        completedVendorRefunds,
+        rejectedRefunds,
+      },
+      data: maskedRefunds,
     });
   } catch (error) {
     next(error);
@@ -539,6 +704,9 @@ export const getRefundById = async (req, res, next) => {
     if (!refund) {
       return next(new AppError("Refund not found", 404));
     }
+
+    // Mask sensitive details
+    refund.customerPayoutDetails = maskCustomerPayoutDetails(refund.customerPayoutDetails);
 
     res.status(200).json({
       success: true,

@@ -60,9 +60,10 @@ export const getEarningsSummary = async (req, res, next) => {
     const transactions = await DeliveryEarningsLedger.find({
       deliveryBoy: deliveryBoy._id,
     })
-      .populate("order", "orderNumber orderStatus totalAmount deliveredAt")
+      .populate("order", "orderNumber orderStatus totalAmount deliveredAt paymentMethod")
+      .populate("deliveryAssignment", "assignmentCode status acceptedAt completedAt")
       .sort({ createdAt: -1 })
-      .limit(20);
+      .limit(50);
 
     res.status(200).json({
       success: true,
@@ -172,9 +173,14 @@ export const getCodCustodySummary = async (req, res, next) => {
         _id: ord._id,
         orderNumber: ord.orderNumber,
         amount,
+        amountCollected: ord.codDetails?.amountCollected || amount,
+        amountHandedOver: ord.codDetails?.amountHandedOver || 0,
+        codStatus: ord.codDetails?.status || (isSubmitted ? "VENDOR_CONFIRMED" : "CASH_COLLECTED"),
         collectedAt: ord.codDetails?.cashCollectedAt || ord.deliveredAt,
         isSubmitted,
+        vendorConfirmed: ord.codDetails?.vendorConfirmed || false,
         handoverReceipt: ord.codDetails?.handoverReceipt || "",
+        discrepancy: ord.codDetails?.discrepancy || null,
       });
     });
 
@@ -195,6 +201,8 @@ export const getCodCustodySummary = async (req, res, next) => {
           amountSubmitted: h.amountSubmitted,
           amountDue: h.amountDue,
           remainingBalance: h.remainingBalance,
+          status: h.status || "VENDOR_CONFIRMED",
+          discrepancy: h.discrepancy || null,
           verifiedAt: h.verifiedAt || h.createdAt,
           paymentMode: h.paymentMode,
           notes: h.notes,

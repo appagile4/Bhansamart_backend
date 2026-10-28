@@ -39,6 +39,7 @@ const vendorTransactionSchema = new mongoose.Schema(
         "COMMISSION_REVERSAL",
         "COMMISSION_DEDUCTION",
         "RECOVERY_ADJUSTMENT",
+        "VENDOR_DIRECT_REFUND",
       ],
       required: true,
       index: true,

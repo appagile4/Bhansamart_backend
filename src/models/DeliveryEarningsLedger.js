@@ -13,6 +13,27 @@ const deliveryEarningsLedgerSchema = new mongoose.Schema(
       ref: "Order",
       required: [true, "Order ID is required"],
     },
+    deliveryAssignment: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DeliveryAssignment",
+      default: null,
+      index: true,
+    },
+    paymentMethod: {
+      type: String,
+      default: "Cash on delivery",
+    },
+    earningType: {
+      type: String,
+      enum: ["COD_DELIVERY", "ONLINE_DELIVERY", "RETURN_PICKUP", "BONUS"],
+      default: "COD_DELIVERY",
+    },
+    idempotencyKey: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
     basePay: {
       type: Number,
       required: true,

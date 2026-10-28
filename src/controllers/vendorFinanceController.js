@@ -451,7 +451,18 @@ export const getCodDueByRiders = async (req, res, next) => {
     const recentHandovers = await CodHandover.find({ vendor: vendor._id })
       .populate("deliveryBoy", "fullName phone")
       .sort({ createdAt: -1 })
-      .limit(10)
+      .limit(20)
+      .lean();
+
+    // Find COD discrepancy orders for this vendor
+    const discrepantOrders = await Order.find({
+      vendor: vendor._id,
+      paymentMethod: "Cash on delivery",
+      "codDetails.discrepancy.hasDiscrepancy": true,
+    })
+      .populate("assignedDeliveryBoy", "fullName phone")
+      .populate("customer", "name phone")
+      .sort({ updatedAt: -1 })
       .lean();
 
     res.status(200).json({
@@ -460,6 +471,16 @@ export const getCodDueByRiders = async (req, res, next) => {
         totalCodPendingSubmission: vendor.wallet?.codCashWithDeliveryBoys || 0,
         ridersCount: ridersDue.length,
         ridersDue,
+        discrepantOrdersCount: discrepantOrders.length,
+        discrepantOrders: discrepantOrders.map((o) => ({
+          orderId: o._id,
+          orderNumber: o.orderNumber,
+          totalAmount: o.totalAmount,
+          riderName: o.assignedDeliveryBoy?.fullName || "Unassigned",
+          riderPhone: o.assignedDeliveryBoy?.phone || "",
+          discrepancy: o.codDetails?.discrepancy,
+          status: o.codDetails?.status,
+        })),
         recentHandovers,
       },
     });
@@ -525,7 +546,7 @@ export const confirmCodHandover = async (req, res, next) => {
     // Generate unique handover receipt number
     const receiptNumber = await CodHandover.generateReceiptNumber();
 
-    // Delegate custody clearing, 1.5% platform commission deduction, and ledger updates
+    // Delegate custody clearing and ledger updates (no digital wallet debit/credit for COD)
     const handoverResult = await recordCodCashSubmission(vendor, deliveryBoy, {
       amountSubmitted: submitted,
       totalDue,
@@ -533,11 +554,32 @@ export const confirmCodHandover = async (req, res, next) => {
       receiptNumber,
       paymentMode,
       notes,
+      confirmedBy: req.user._id,
+      discrepancyReason: req.body.discrepancyReason || "",
     });
+
+    if (handoverResult.hasShortfall) {
+      await notifyStaffAdminsForVendor({
+        vendorId: vendor._id,
+        eventType: "staff_cod:discrepancy",
+        title: "⚠️ COD Handover Shortfall Discrepancy",
+        message: `Vendor ${vendor.businessDetails?.businessName || "Store"} reported cash shortfall of NPR ${handoverResult.shortfall} from ${deliveryBoy.fullName}. Receipt #${receiptNumber}.`,
+        data: {
+          vendorId: vendor._id,
+          deliveryBoyId: deliveryBoy._id,
+          expectedAmount: totalDue,
+          amountSubmitted: submitted,
+          shortfall: handoverResult.shortfall,
+          receiptNumber,
+        },
+      });
+    }
 
     res.status(200).json({
       success: true,
-      message: `COD cash of NPR ${submitted.toLocaleString()} received and confirmed successfully. Platform commission: NPR ${handoverResult.totalCommissionDue}.`,
+      message: handoverResult.hasShortfall
+        ? `COD cash handover confirmed with recorded shortfall discrepancy of NPR ${handoverResult.shortfall}.`
+        : `COD cash of NPR ${submitted.toLocaleString()} received and confirmed successfully.`,
       data: handoverResult,
     });
   } catch (error) {

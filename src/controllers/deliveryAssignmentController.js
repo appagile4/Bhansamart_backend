@@ -545,6 +545,8 @@ export const verifyDeliveryOtp = async (req, res, next) => {
       } else if (order.paymentMethod === "Cash on delivery") {
         await recordCodDoorstepCollection(order, deliveryBoy, {
           paymentMode: "CASH",
+          collectedAmount: req.body.collectedAmount !== undefined ? req.body.collectedAmount : null,
+          discrepancyReason: req.body.discrepancyReason || "",
           now,
         });
       } else {
@@ -563,36 +565,68 @@ export const verifyDeliveryOtp = async (req, res, next) => {
     });
     await order.save();
 
-    // Update assignment status
-    await DeliveryAssignment.findOneAndUpdate(
+    // Update assignment status and get assignment reference
+    const assignment = await DeliveryAssignment.findOneAndUpdate(
       { order: order._id, deliveryBoy: deliveryBoy._id },
-      { $set: { status: "COMPLETED" } }
+      { $set: { status: "COMPLETED", completedAt: now } },
+      { new: true }
     );
 
     // Calculate Delivery Earnings
-    const basePay = order.deliveryEarnings?.basePay || 40;
-    const distancePay = order.deliveryEarnings?.distancePay || 20;
-    const tip = order.deliveryEarnings?.tip || 0;
-    const totalEarnings = basePay + distancePay + tip;
+    // RULE: Credit ₹30 as the delivery earning for eligible successfully completed COD delivery
+    const isCod = order.paymentMethod === "Cash on delivery";
+    let basePay = 30;
+    let distancePay = 0;
+    let tip = order.deliveryEarnings?.tip || 0;
+    let totalEarnings = 30 + tip;
 
-    // Credit DeliveryEarningsLedger (Strict separation from security deposit)
-    await DeliveryEarningsLedger.create({
-      deliveryBoy: deliveryBoy._id,
-      order: order._id,
-      basePay,
-      distancePay,
-      customerTip: tip,
-      totalEarnings,
-      distanceKm: 2.0,
-      settlementStatus: "PENDING",
+    if (!isCod) {
+      basePay = order.deliveryEarnings?.basePay || 40;
+      distancePay = order.deliveryEarnings?.distancePay || 20;
+      totalEarnings = basePay + distancePay + tip;
+    } else if (
+      order.deliveryEarnings?.total &&
+      order.deliveryEarnings.total !== 60 &&
+      order.deliveryEarnings.total !== 30
+    ) {
+      // Respect configured specific order rule if explicitly set
+      basePay = order.deliveryEarnings.basePay || order.deliveryEarnings.total;
+      distancePay = order.deliveryEarnings.distancePay || 0;
+      totalEarnings = order.deliveryEarnings.total;
+    }
+
+    // Strict Idempotency Check: prevent duplicate earnings on retries or duplicate events
+    const earningIdempotencyKey = `EARN-${order._id}`;
+    const existingLedger = await DeliveryEarningsLedger.findOne({
+      $or: [{ order: order._id }, { idempotencyKey: earningIdempotencyKey }],
     });
 
-    // Update DeliveryBoy Wallet and Availability
+    if (!existingLedger) {
+      // Credit DeliveryEarningsLedger linked to order & deliveryAssignment
+      await DeliveryEarningsLedger.create({
+        deliveryBoy: deliveryBoy._id,
+        order: order._id,
+        deliveryAssignment: assignment?._id || null,
+        basePay,
+        distancePay,
+        customerTip: tip,
+        totalEarnings,
+        distanceKm: 2.0,
+        settlementStatus: "PENDING",
+        paymentMethod: order.paymentMethod,
+        earningType: isCod ? "COD_DELIVERY" : "ONLINE_DELIVERY",
+        idempotencyKey: earningIdempotencyKey,
+      });
+
+      // Credit wallet balance exactly once
+      deliveryBoy.wallet.currentBalance = Math.round(((deliveryBoy.wallet.currentBalance || 0) + totalEarnings) * 100) / 100;
+      deliveryBoy.wallet.totalEarned = Math.round(((deliveryBoy.wallet.totalEarned || 0) + totalEarnings) * 100) / 100;
+    }
+
+    // Update DeliveryBoy Availability & metrics
     deliveryBoy.availability = "ONLINE"; // Available for next delivery
     deliveryBoy.activeOrderId = null;
     deliveryBoy.metrics.totalDeliveries += 1;
-    deliveryBoy.wallet.currentBalance += totalEarnings;
-    deliveryBoy.wallet.totalEarned += totalEarnings;
     await deliveryBoy.save();
 
     // Real-time broadcast
