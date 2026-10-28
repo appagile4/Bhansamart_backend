@@ -120,10 +120,17 @@ export const getAdminDashboardStats = async (req, res, next) => {
         ...vendorQuery,
         $or: [{ status: { $in: ["pending", "draft"] } }, { "businessDetails.verificationStatus": "pending" }],
       }),
-      isSuperAdmin ? User.countDocuments({ role: "customer" }) : 0,
-      isSuperAdmin ? User.countDocuments({ role: "customer", isActive: true }) : 0,
-      isSuperAdmin ? DeliveryBoy.countDocuments({}) : 0,
-      isSuperAdmin ? DeliveryBoy.countDocuments({ availability: "ONLINE" }) : 0,
+      isSuperAdmin
+        ? User.countDocuments({ role: "customer" })
+        : Order.distinct("customer", { vendor: { $in: accessibleVendors || [] } }).then((ids) => ids.length),
+      isSuperAdmin
+        ? User.countDocuments({ role: "customer", isActive: true })
+        : Order.distinct("customer", {
+            vendor: { $in: accessibleVendors || [] },
+            createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+          }).then((ids) => ids.length),
+      DeliveryBoy.countDocuments({}),
+      DeliveryBoy.countDocuments({ availability: "ONLINE" }),
       Order.aggregate([
         { $match: orderQuery },
         {
@@ -131,11 +138,11 @@ export const getAdminDashboardStats = async (req, res, next) => {
             _id: null,
             totalOrders: { $sum: 1 },
             completedOrders: {
-              $sum: { $cond: [{ $eq: ["$orderStatus", "DELIVERED"] }, 1, 0] },
+              $sum: { $cond: [{ $in: ["$orderStatus", ["DELIVERED", "delivered", "COMPLETED", "completed"]] }, 1, 0] },
             },
             cancelledOrders: {
               $sum: {
-                $cond: [{ $in: ["$orderStatus", ["CANCELLED", "REJECTED"]] }, 1, 0],
+                $cond: [{ $in: ["$orderStatus", ["CANCELLED", "REJECTED", "cancelled", "rejected"]] }, 1, 0],
               },
             },
             pendingOrders: {
@@ -144,7 +151,18 @@ export const getAdminDashboardStats = async (req, res, next) => {
                   {
                     $in: [
                       "$orderStatus",
-                      ["PLACED", "ACCEPTED", "PREPARING", "READY_FOR_PICKUP", "OUT_FOR_DELIVERY"],
+                      [
+                        "PLACED",
+                        "ACCEPTED",
+                        "PREPARING",
+                        "READY_FOR_PICKUP",
+                        "OUT_FOR_DELIVERY",
+                        "placed",
+                        "accepted",
+                        "preparing",
+                        "ready_for_pickup",
+                        "out_for_delivery",
+                      ],
                     ],
                   },
                   1,
@@ -154,7 +172,16 @@ export const getAdminDashboardStats = async (req, res, next) => {
             },
             grossSales: {
               $sum: {
-                $cond: [{ $eq: ["$paymentStatus", "paid"] }, "$totalAmount", 0],
+                $cond: [
+                  {
+                    $or: [
+                      { $in: ["$paymentStatus", ["paid", "PAID"]] },
+                      { $in: ["$orderStatus", ["DELIVERED", "delivered", "COMPLETED", "completed"]] },
+                    ],
+                  },
+                  "$totalAmount",
+                  0,
+                ],
               },
             },
           },
@@ -170,16 +197,22 @@ export const getAdminDashboardStats = async (req, res, next) => {
               $group: {
                 _id: null,
                 totalCapturedGross: {
-                  $sum: { $cond: [{ $in: ["$type", ["ORDER_CREDIT", "COD_ORDER_RECORD"]] }, "$grossAmount", 0] },
+                  $sum: { $cond: [{ $in: ["$type", ["ORDER_CREDIT", "ORDER_EARNING", "COD_COLLECTION", "COD_ORDER_RECORD"]] }, "$grossAmount", 0] },
                 },
                 totalCommission: {
-                  $sum: { $cond: [{ $in: ["$type", ["ORDER_CREDIT", "COD_ORDER_RECORD"]] }, "$commission", 0] },
+                  $sum: { $cond: [{ $in: ["$type", ["ORDER_CREDIT", "ORDER_EARNING"]] }, "$commission", 0] },
                 },
                 totalCommissionReversals: {
                   $sum: { $cond: [{ $eq: ["$type", "COMMISSION_REVERSAL"] }, "$amount", 0] },
                 },
                 totalVendorEarnings: {
-                  $sum: { $cond: [{ $in: ["$type", ["ORDER_CREDIT", "COD_ORDER_RECORD"]] }, "$netAmount", 0] },
+                  $sum: {
+                    $cond: [
+                      { $in: ["$type", ["ORDER_CREDIT", "ORDER_EARNING"]] },
+                      "$netAmount",
+                      { $cond: [{ $in: ["$type", ["COD_COLLECTION", "COD_ORDER_RECORD"]] }, "$grossAmount", 0] },
+                    ],
+                  },
                 },
                 totalRefundDeductions: {
                   $sum: { $cond: [{ $eq: ["$type", "REFUND_DEDUCTION"] }, "$amount", 0] },
@@ -320,7 +353,18 @@ export const getDashboardCharts = async (req, res, next) => {
           _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
           ordersCount: { $sum: 1 },
           sales: {
-            $sum: { $cond: [{ $eq: ["$paymentStatus", "paid"] }, "$totalAmount", 0] },
+            $sum: {
+              $cond: [
+                {
+                  $or: [
+                    { $in: ["$paymentStatus", ["paid", "PAID"]] },
+                    { $in: ["$orderStatus", ["DELIVERED", "delivered", "COMPLETED", "completed"]] },
+                  ],
+                },
+                "$totalAmount",
+                0,
+              ],
+            },
           },
         },
       },
@@ -369,11 +413,26 @@ export const getAllVendorsAdmin = async (req, res, next) => {
     }
 
     if (search) {
+      const matchingUsers = await User.find({
+        $or: [
+          { name: { $regex: search, $options: "i" } },
+          { phone: { $regex: search, $options: "i" } },
+          { email: { $regex: search, $options: "i" } },
+        ],
+      }).select("_id").lean();
+      const userIds = matchingUsers.map((u) => u._id);
+
       conditions.push({
         $or: [
           { "businessDetails.businessName": { $regex: search, $options: "i" } },
           { "sellerDetails.sellerName": { $regex: search, $options: "i" } },
           { "sellerDetails.sellerPhone": { $regex: search, $options: "i" } },
+          { "businessDetails.businessPhone": { $regex: search, $options: "i" } },
+          { "brandDetails.brandName": { $regex: search, $options: "i" } },
+          { "shippingLocations.city": { $regex: search, $options: "i" } },
+          { "shippingLocations.warehouseAddress": { $regex: search, $options: "i" } },
+          { "sellerDetails.city": { $regex: search, $options: "i" } },
+          { userId: { $in: userIds } },
         ],
       });
     }
@@ -445,15 +504,60 @@ export const getAllVendorsAdmin = async (req, res, next) => {
       }
     }
 
+    // Aggregate order metrics for each vendor
+    const orderAgg = await Order.aggregate([
+      { $match: { vendor: { $in: vendorIds } } },
+      {
+        $group: {
+          _id: "$vendor",
+          totalOrders: { $sum: 1 },
+          deliveredOrders: {
+            $sum: {
+              $cond: [
+                { $in: ["$orderStatus", ["delivered", "Delivered", "DELIVERED", "completed", "COMPLETED"]] },
+                1,
+                0,
+              ],
+            },
+          },
+          totalGrossSales: {
+            $sum: {
+              $cond: [
+                { $in: ["$orderStatus", ["cancelled", "refunded", "CANCELLED", "REFUNDED"]] },
+                0,
+                "$totalAmount",
+              ],
+            },
+          },
+        },
+      },
+    ]);
+    const orderStatsMap = new Map();
+    for (const stat of orderAgg) {
+      orderStatsMap.set(stat._id.toString(), stat);
+    }
+
     const formatted = vendors.map((v) => {
       const rawStatus = (v.status || v.businessDetails?.verificationStatus || "approved").toLowerCase();
       const normalizedStatus = rawStatus === "active" ? "approved" : rawStatus;
+      const stats = orderStatsMap.get(v._id.toString()) || { totalOrders: 0, deliveredOrders: 0, totalGrossSales: 0 };
 
       return {
         ...v,
         status: normalizedStatus,
         verificationStatus: normalizedStatus,
+        isStoreOpen: v.isStoreOpen !== false,
         assignedAdmin: vendorAdminMap.get(v._id.toString()) || null,
+        totalOrders: stats.totalOrders,
+        deliveredOrders: stats.deliveredOrders,
+        totalGrossSales: stats.totalGrossSales,
+        wallet: {
+          currentBalance: v.wallet?.currentBalance || 0,
+          totalEarned: v.wallet?.totalEarned || stats.totalGrossSales || 0,
+          pendingSettlement: v.wallet?.pendingSettlement || 0,
+          codCashWithDeliveryBoys: v.wallet?.codCashWithDeliveryBoys || 0,
+          pendingRecoveries: v.wallet?.pendingRecoveries || 0,
+        },
       };
     });
 
@@ -533,9 +637,19 @@ export const getVendorDetailsAdmin = async (req, res, next) => {
             totalCommission: {
               $sum: {
                 $cond: [
-                  { $in: ["$orderStatus", ["cancelled", "refunded", "CANCELLED", "REFUNDED"]] },
+                  {
+                    $or: [
+                      { $in: ["$orderStatus", ["cancelled", "refunded", "CANCELLED", "REFUNDED"]] },
+                      { $in: ["$paymentMethod", ["Cash on delivery", "COD", "cash_on_delivery"]] },
+                    ],
+                  },
                   0,
-                  { $ifNull: ["$commissionAmount", { $multiply: ["$totalAmount", 0.015] }] },
+                  {
+                    $ifNull: [
+                      "$financialLedger.commissionAmount",
+                      { $ifNull: ["$commissionAmount", { $multiply: ["$totalAmount", 0.015] }] },
+                    ],
+                  },
                 ],
               },
             },
@@ -544,7 +658,18 @@ export const getVendorDetailsAdmin = async (req, res, next) => {
                 $cond: [
                   { $in: ["$orderStatus", ["cancelled", "refunded", "CANCELLED", "REFUNDED"]] },
                   0,
-                  { $ifNull: ["$vendorNetAmount", { $multiply: ["$totalAmount", 0.985] }] },
+                  {
+                    $cond: [
+                      { $in: ["$paymentMethod", ["Cash on delivery", "COD", "cash_on_delivery"]] },
+                      "$totalAmount",
+                      {
+                        $ifNull: [
+                          "$financialLedger.vendorNetAmount",
+                          { $ifNull: ["$vendorNetAmount", { $multiply: ["$totalAmount", 0.985] }] },
+                        ],
+                      },
+                    ],
+                  },
                 ],
               },
             },
@@ -598,11 +723,22 @@ export const getVendorDetailsAdmin = async (req, res, next) => {
 
     // Format all vendor orders with exact accounting and items
     const formattedOrders = vendorOrders.map((o) => {
+      const isCod = o.paymentMethod === "Cash on delivery" || o.paymentMethod === "COD" || o.paymentMethod === "cash_on_delivery";
       const gross = o.totalAmount || 0;
-      const commission =
-        o.commissionAmount != null ? o.commissionAmount : Math.round(gross * 0.015 * 100) / 100;
-      const vendorNet =
-        o.vendorNetAmount != null ? o.vendorNetAmount : Math.round((gross - commission) * 100) / 100;
+      const commission = isCod
+        ? 0
+        : (o.financialLedger?.commissionAmount != null
+          ? o.financialLedger.commissionAmount
+          : (o.commissionAmount != null
+            ? o.commissionAmount
+            : Math.round(gross * 0.015 * 100) / 100));
+      const vendorNet = isCod
+        ? gross
+        : (o.financialLedger?.vendorNetAmount != null
+          ? o.financialLedger.vendorNetAmount
+          : (o.vendorNetAmount != null
+            ? o.vendorNetAmount
+            : Math.round((gross - commission) * 100) / 100));
       return {
         ...o,
         orderStatus: (o.orderStatus || "PLACED").toUpperCase(),
@@ -645,8 +781,9 @@ export const getVendorDetailsAdmin = async (req, res, next) => {
       .forEach((t) => {
         if (t.order?._id) orderTxIds.add(t.order._id.toString());
         const gross = t.grossAmount || t.amount || 0;
-        const comm = t.commission != null ? t.commission : Math.round(gross * 0.015 * 100) / 100;
-        const net = t.netAmount != null ? t.netAmount : Math.round((gross - comm) * 100) / 100;
+        const isCodTxn = ["COD_COLLECTION", "COD_HANDOVER", "DIRECT_QR_PAYMENT", "VENDOR_DIRECT_REFUND"].includes(t.type) || t.paymentMethod === "Cash on delivery" || t.paymentMethod === "COD";
+        const comm = isCodTxn ? 0 : (t.commission != null ? t.commission : Math.round(gross * 0.015 * 100) / 100);
+        const net = isCodTxn ? gross : (t.netAmount != null ? t.netAmount : Math.round((gross - comm) * 100) / 100);
         productTransactions.push({
           _id: t._id,
           type: t.type || "ORDER_EARNING",
@@ -708,8 +845,12 @@ export const getVendorDetailsAdmin = async (req, res, next) => {
         claimType: r.claimType || "RETURN_REFUND",
         status: r.status || "REQUESTED",
         amount: r.amount || 0,
-        vendorDeduction: r.vendorDeduction || r.amount || 0,
-        commissionReversal: r.commissionReversal || Math.round((r.amount || 0) * 0.015 * 100) / 100,
+        vendorDeduction: (r.isVendorFunded || r.customerPayoutDetails?.method === "UPI" || r.order?.paymentMethod === "Cash on delivery" || r.order?.paymentMethod === "COD")
+          ? (r.amount || 0)
+          : (r.vendorDeduction || r.amount || 0),
+        commissionReversal: (r.isVendorFunded || r.customerPayoutDetails?.method === "UPI" || r.order?.paymentMethod === "Cash on delivery" || r.order?.paymentMethod === "COD")
+          ? 0
+          : (r.commissionReversal || Math.round((r.amount || 0) * 0.015 * 100) / 100),
         reason: r.reason || "Customer refund claim",
         description: r.description || "",
         orderNumber: r.orderNumber || r.order?.orderNumber || "N/A",
@@ -750,8 +891,12 @@ export const getVendorDetailsAdmin = async (req, res, next) => {
           claimType,
           status,
           amount: o.totalAmount || 0,
-          vendorDeduction: o.vendorNetAmount || Math.round((o.totalAmount || 0) * 0.985 * 100) / 100,
-          commissionReversal: o.commissionAmount || Math.round((o.totalAmount || 0) * 0.015 * 100) / 100,
+          vendorDeduction: (o.paymentMethod === "Cash on delivery" || o.paymentMethod === "COD")
+            ? (o.totalAmount || 0)
+            : (o.vendorNetAmount || Math.round((o.totalAmount || 0) * 0.985 * 100) / 100),
+          commissionReversal: (o.paymentMethod === "Cash on delivery" || o.paymentMethod === "COD")
+            ? 0
+            : (o.commissionAmount || Math.round((o.totalAmount || 0) * 0.015 * 100) / 100),
           reason: o.rejectionReason || "Customer initiated order return / refund",
           description: `Order ${o.orderNumber} flagged as ${claimType}`,
           orderNumber: o.orderNumber,

@@ -53,6 +53,7 @@ import {
   finalizeRefundPayoutAction,
   getStaffNotificationsAdmin,
   markStaffNotificationRead,
+  getCustomerDetailsAdmin,
 } from "../controllers/staffAdminOperationsController.js";
 import {
   getBroadcastPermissions,
@@ -94,6 +95,8 @@ router.put("/admins/:id", requireSuperadminOnly, updateAdminAccount);
 
 // 4. Customer Management
 router.get("/customers", getAllCustomersAdmin);
+router.get("/customers/:id", getCustomerDetailsAdmin);
+router.get("/staff-operations/customers/:id", getCustomerDetailsAdmin);
 
 // 5. Delivery Boy Management & Monitoring
 router.get("/delivery-boys", getAllDeliveryBoysAdmin);

@@ -5,7 +5,13 @@ import Cart from "../models/Cart.js";
 import Address from "../models/Address.js";
 import DeliveryAssignment from "../models/DeliveryAssignment.js";
 import VendorNotification from "../models/VendorNotification.js";
-import Refund from "../models/Refund.js";
+import Refund, { maskCustomerPayoutDetails } from "../models/Refund.js";
+import DeliveryEarningsLedger from "../models/DeliveryEarningsLedger.js";
+import CodHandover from "../models/CodHandover.js";
+import {
+  resolveStaffVendorScope,
+  assertVendorAccessible,
+} from "./staffAdminOperationsController.js";
 import { sendPushToUsers, sendPushToVendors } from "../services/pushNotificationService.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
@@ -235,6 +241,24 @@ export const createOrder = async (req, res, next) => {
       deliveryAddress: resolvedAddress,
       paymentMethod,
       paymentStatus: paymentMethod === "Cash on delivery" ? "pending" : "paid",
+      financialLedger:
+        paymentMethod === "Cash on delivery" || paymentMethod === "COD"
+          ? {
+              eligibleAmount: totalAmount,
+              commissionRate: 0,
+              commissionAmount: 0,
+              vendorNetAmount: totalAmount,
+              settlementStatus: "PENDING",
+              settledAt: null,
+            }
+          : {
+              eligibleAmount: totalAmount,
+              commissionRate: 0.015,
+              commissionAmount: Math.round(totalAmount * 0.015 * 100) / 100,
+              vendorNetAmount: Math.round((totalAmount - Math.round(totalAmount * 0.015 * 100) / 100) * 100) / 100,
+              settlementStatus: "PENDING",
+              settledAt: null,
+            },
       orderStatus: "PLACED",
       statusHistory: [
         {
@@ -403,22 +427,24 @@ export const getOrderById = async (req, res, next) => {
 
     const order = await Order.findOne(query)
       .select("+pickupOtp.displayCode +deliveryOtp.displayCode")
-      .populate("vendor", "businessDetails sellerDetails brandDetails shippingLocations")
-      .populate("customer", "name email phone")
-      .populate("assignedDeliveryBoy", "fullName phone vehicleDetails metrics currentLocation");
+      .populate("vendor", "businessDetails sellerDetails brandDetails shippingLocations wallet")
+      .populate("customer", "name email phone avatar createdAt")
+      .populate("assignedDeliveryBoy", "fullName phone vehicleDetails metrics currentLocation user wallet codCashInCustody");
 
     if (!order) {
       return next(new AppError("Order not found", 404));
     }
 
     // Authorization check: customer, vendor, or admin
-    const isCustomer = order.customer._id.toString() === userId;
+    const isCustomer = order.customer && order.customer._id.toString() === userId;
     let isVendor = false;
     const vendor = await resolveVendor(req.user);
-    if (vendor && order.vendor._id.toString() === vendor._id.toString()) {
+    if (vendor && order.vendor && order.vendor._id.toString() === vendor._id.toString()) {
       isVendor = true;
     }
-    const isAdmin = req.user.role === "admin" || req.user.role === "superadmin";
+    const isSuperAdmin = req.user.role === "superadmin";
+    const isStaffAdmin = req.user.role === "admin";
+    const isAdmin = isSuperAdmin || isStaffAdmin;
 
     if (!isCustomer && !isVendor && !isAdmin) {
       return next(
@@ -426,9 +452,14 @@ export const getOrderById = async (req, res, next) => {
       );
     }
 
+    // Backend scope enforcement: Staff admin can only view orders of assigned vendors
+    if (isStaffAdmin && !isSuperAdmin) {
+      assertVendorAccessible(req, order.vendor?._id || order.vendor);
+    }
+
     const orderData = order.toObject();
 
-    // Security: Only share Pickup OTP with authorized Vendor, and Delivery OTP with Customer
+    // Security: Only share Pickup OTP with authorized Vendor/Admin, and Delivery OTP with Customer/Admin
     if (isVendor || isAdmin) {
       orderData.vendorPickupOtp = order.pickupOtp?.displayCode || null;
     } else {
@@ -441,19 +472,106 @@ export const getOrderById = async (req, res, next) => {
       delete orderData.deliveryOtp;
     }
 
-    // Attach latest refund / replacement details if this order has an active or past claim
-    if (
-      order.refundStatus &&
-      order.refundStatus !== "NONE" &&
-      order.refundStatus !== "NOT_APPLICABLE"
-    ) {
-      const latestRefund = await Refund.findOne({ order: order._id })
+    // Parallel lookups for assignments, earnings, COD handovers, refunds, and customer insights
+    const [
+      assignments,
+      earningsLedger,
+      codHandovers,
+      allRefunds,
+      customerOrdersAgg,
+    ] = await Promise.all([
+      DeliveryAssignment.find({ order: order._id })
+        .populate("deliveryBoy", "fullName phone vehicleDetails avatar")
         .sort({ createdAt: -1 })
+        .lean(),
+      DeliveryEarningsLedger.findOne({ order: order._id }).lean(),
+      CodHandover.find({
+        $or: [
+          { "orders.order": order._id },
+          { eligibleOrders: order._id },
+        ],
+      }).sort({ createdAt: -1 }).lean(),
+      Refund.find({ order: order._id })
         .populate("replacementOrder", "orderNumber orderStatus totalAmount")
-        .lean();
-      if (latestRefund) {
-        orderData.refundDetails = latestRefund;
-      }
+        .populate("pickup.deliveryBoy", "fullName phone")
+        .sort({ createdAt: -1 })
+        .lean(),
+      order.customer
+        ? Order.aggregate([
+            {
+              $match: {
+                customer: order.customer._id,
+                orderStatus: "DELIVERED",
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                totalCompletedOrders: { $sum: 1 },
+                totalCompletedSpending: { $sum: "$totalAmount" },
+                lastPurchaseDate: { $max: "$deliveredAt" },
+              },
+            },
+          ])
+        : Promise.resolve([]),
+    ]);
+
+    // Attach Customer Lifetime Insights
+    const custAgg = customerOrdersAgg[0] || {
+      totalCompletedOrders: 0,
+      totalCompletedSpending: 0,
+      lastPurchaseDate: null,
+    };
+    orderData.customerInsights = {
+      totalCompletedOrders: custAgg.totalCompletedOrders,
+      totalCompletedSpending: custAgg.totalCompletedSpending,
+      lastPurchaseDate: custAgg.lastPurchaseDate,
+    };
+
+    // Attach Delivery & Assignment Details
+    orderData.deliveryAssignments = assignments;
+    orderData.activeAssignment = assignments[0] || null;
+    orderData.deliveryEarning = earningsLedger
+      ? earningsLedger.totalEarnings
+      : (order.deliveryEarnings?.total || 30);
+
+    // Attach COD Tracking Details
+    if (order.paymentMethod === "Cash on delivery") {
+      const latestHandover = codHandovers[0] || null;
+      orderData.codTracking = {
+        amountDue: order.codDetails?.amountDue ?? order.totalAmount,
+        amountCollected:
+          order.codDetails?.amountCollected ??
+          (order.codDetails?.status !== "COD_PENDING" ? order.totalAmount : 0),
+        status: order.codDetails?.status || "COD_PENDING",
+        collectedBy: order.assignedDeliveryBoy
+          ? {
+              _id: order.assignedDeliveryBoy._id,
+              name: order.assignedDeliveryBoy.fullName,
+              phone: order.assignedDeliveryBoy.phone,
+            }
+          : null,
+        deliveryEarning: orderData.deliveryEarning,
+        handoverStatus: latestHandover?.status || order.codDetails?.status || "PENDING",
+        handoverReceipt: order.codDetails?.handoverReceipt || latestHandover?.receiptNumber || null,
+        vendorConfirmed: order.codDetails?.vendorConfirmed || false,
+        vendorConfirmedAt: order.codDetails?.vendorConfirmedAt || latestHandover?.confirmedAt || null,
+        vendorConfirmedBy: order.codDetails?.vendorConfirmedBy || null,
+        discrepancy: order.codDetails?.discrepancy || latestHandover?.discrepancy || null,
+      };
+    }
+
+    // Attach Refunds (with masked sensitive customer payout details)
+    orderData.refunds = (allRefunds || []).map((r) => ({
+      ...r,
+      customerPayoutDetails: maskCustomerPayoutDetails(r.customerPayoutDetails),
+    }));
+    orderData.refundDetails = orderData.refunds[0] || null;
+
+    // Financial sanitization for Staff Admin: hide internal vendor ledger fields
+    if (isStaffAdmin && !isSuperAdmin && orderData.vendor?.wallet) {
+      delete orderData.vendor.wallet.pendingSettlement;
+      delete orderData.vendor.wallet.pendingRecoveries;
     }
 
     return res.status(200).json({

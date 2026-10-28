@@ -431,7 +431,8 @@ export async function recordCodDoorstepCollection(order, deliveryBoy, {
  * 3. COD CASH SUBMISSION AT VENDOR STORE RECONCILIATION
  * CRITICAL RULE: Cash submission clears the custody obligation.
  * It DOES NOT credit the vendor's wallet with duplicate sales earnings.
- * The 1.5% superadmin commission is deducted exactly once from the platform balance.
+ * SuperAdmin does NOT receive any commission on COD orders (0% platform commission).
+ * Vendor retains 100% of the physical COD cash received.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 export async function recordCodCashSubmission(vendor, deliveryBoy, {
@@ -508,6 +509,9 @@ export async function recordCodCashSubmission(vendor, deliveryBoy, {
     if (ord.financialLedger) {
       ord.financialLedger.settlementStatus = "COD_SUBMITTED";
       ord.financialLedger.settledAt = new Date();
+      ord.financialLedger.commissionRate = 0;
+      ord.financialLedger.commissionAmount = 0;
+      ord.financialLedger.vendorNetAmount = ord.totalAmount || ord.itemsTotal || 0;
     }
     await ord.save();
     settledOrderIds.push(ord._id);

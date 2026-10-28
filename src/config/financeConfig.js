@@ -1,13 +1,17 @@
 /**
  * Central Financial and Commission Configuration for BhansaMart
  *
- * Fixed Superadmin Commission: 1.5% of eligible product transaction amount.
+ * Fixed Superadmin Commission: 1.5% of eligible online product transaction amount.
+ * COD Commission: 0% (SuperAdmin receives NO commission on Cash on Delivery orders).
  * Never configurable by vendors or clients.
  */
 
 export const FINANCE_CONFIG = {
-  // Superadmin fixed commission rate: 1.5%
+  // Superadmin fixed commission rate for online orders: 1.5%
   SUPERADMIN_COMMISSION_RATE: 0.015,
+
+  // Superadmin commission rate for COD orders: 0% (Superadmin ko COD par koi commission nahi milega)
+  COD_COMMISSION_RATE: 0.0,
 
   // Configured delivery earning for COD deliveries (₹30)
   DEFAULT_COD_DELIVERY_EARNING: 30,

@@ -1762,3 +1762,226 @@ export const markStaffNotificationRead = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * @desc    Get Detailed Customer Profile & Historical Purchase Insights
+ * @route   GET /api/admin/customers/:id or /api/admin/staff-operations/customers/:id
+ * @access  Private (Admin / Superadmin)
+ */
+export const getCustomerDetailsAdmin = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { isSuperAdmin, accessibleIds } = resolveStaffVendorScope(req);
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new AppError("Invalid Customer ID", 400));
+    }
+
+    const customer = await User.findById(id)
+      .select("-password -tokens -__v")
+      .lean();
+
+    if (!customer) {
+      return next(new AppError("Customer not found", 404));
+    }
+
+    // Scope check: Staff admin can only view customers who have placed orders with their assigned vendors
+    let scopedVendorFilter = {};
+    if (!isSuperAdmin) {
+      const validAccessible = (accessibleIds || [])
+        .filter((vid) => vid && mongoose.Types.ObjectId.isValid(vid))
+        .map((vid) => new mongoose.Types.ObjectId(vid));
+
+      const matchingOrdersCount = await Order.countDocuments({
+        customer: customer._id,
+        vendor: { $in: validAccessible },
+      });
+
+      if (matchingOrdersCount === 0) {
+        return next(
+          new AppError(
+            "Access denied. This customer has no purchase history within your assigned vendor scope.",
+            403
+          )
+        );
+      }
+      scopedVendorFilter = { vendor: { $in: validAccessible } };
+    }
+
+    // Fetch customer's orders within scope
+    const orderQuery = {
+      customer: customer._id,
+      ...scopedVendorFilter,
+    };
+
+    const orders = await Order.find(orderQuery)
+      .populate("vendor", "businessDetails sellerDetails brandDetails")
+      .populate("assignedDeliveryBoy", "fullName phone")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Metrics calculation
+    const totalOrders = orders.length;
+    const completedOrders = orders.filter((o) => o.orderStatus === "DELIVERED");
+    const activeOrders = orders.filter(
+      (o) => !["DELIVERED", "CANCELLED", "REJECTED"].includes(o.orderStatus)
+    );
+    const cancelledOrders = orders.filter((o) =>
+      ["CANCELLED", "REJECTED"].includes(o.orderStatus)
+    );
+
+    const totalCompletedSpending = completedOrders.reduce(
+      (sum, o) => sum + (o.totalAmount || 0),
+      0
+    );
+
+    const lastPurchaseDate =
+      completedOrders.length > 0
+        ? completedOrders[0].deliveredAt || completedOrders[0].createdAt
+        : orders.length > 0
+        ? orders[0].createdAt
+        : null;
+
+    // Fetch customer refunds within scope
+    const refunds = await Refund.find({
+      customer: customer._id,
+      ...scopedVendorFilter,
+    })
+      .populate("order", "orderNumber totalAmount orderStatus")
+      .populate("vendor", "businessDetails.businessName")
+      .populate("pickup.deliveryBoy", "fullName phone")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const maskedRefunds = refunds.map((r) => ({
+      ...r,
+      customerPayoutDetails: maskCustomerPayoutDetails(r.customerPayoutDetails),
+    }));
+
+    const totalRefundedAmount = refunds
+      .filter((r) => ["COMPLETED", "APPROVED"].includes(r.status))
+      .reduce((sum, r) => sum + (r.amount || r.totalAmount || 0), 0);
+
+    const netSpending = Math.max(0, totalCompletedSpending - totalRefundedAmount);
+
+    // Most purchased products
+    const productMap = {};
+    for (const ord of orders) {
+      if (ord.orderStatus === "CANCELLED" || ord.orderStatus === "REJECTED") continue;
+      for (const item of ord.items || []) {
+        const pId = item.productId || item.product?.toString() || item.name;
+        if (!productMap[pId]) {
+          productMap[pId] = {
+            productId: item.productId || item.product,
+            name: item.name || "Product",
+            imageUrl: item.imageUrl || "",
+            totalQuantity: 0,
+            totalSpent: 0,
+            orderCount: 0,
+          };
+        }
+        productMap[pId].totalQuantity += item.quantity || 1;
+        productMap[pId].totalSpent += (item.price || 0) * (item.quantity || 1);
+        productMap[pId].orderCount += 1;
+      }
+    }
+    const mostPurchasedProducts = Object.values(productMap)
+      .sort((a, b) => b.totalQuantity - a.totalQuantity)
+      .slice(0, 10);
+
+    // Vendor-wise summary
+    const vendorMap = {};
+    for (const ord of orders) {
+      const vId = (ord.vendor?._id || ord.vendor)?.toString();
+      const vName =
+        ord.vendor?.businessDetails?.businessName || ord.vendorName || "Store";
+      if (!vendorMap[vId]) {
+        vendorMap[vId] = {
+          vendorId: vId,
+          businessName: vName,
+          orderCount: 0,
+          totalSpent: 0,
+          completedCount: 0,
+        };
+      }
+      vendorMap[vId].orderCount += 1;
+      if (ord.orderStatus === "DELIVERED") {
+        vendorMap[vId].totalSpent += ord.totalAmount || 0;
+        vendorMap[vId].completedCount += 1;
+      }
+    }
+    const vendorSpendingSummary = Object.values(vendorMap).sort(
+      (a, b) => b.totalSpent - a.totalSpent
+    );
+
+    // Delivery history
+    const deliveryPartnerMap = {};
+    for (const ord of orders) {
+      if (!ord.assignedDeliveryBoy) continue;
+      const dId = (ord.assignedDeliveryBoy._id || ord.assignedDeliveryBoy).toString();
+      const dName = ord.assignedDeliveryBoy.fullName || "Delivery Partner";
+      const dPhone = ord.assignedDeliveryBoy.phone || "";
+      if (!deliveryPartnerMap[dId]) {
+        deliveryPartnerMap[dId] = {
+          deliveryBoyId: dId,
+          fullName: dName,
+          phone: dPhone,
+          deliveriesCount: 0,
+          lastDeliveryAt: null,
+        };
+      }
+      deliveryPartnerMap[dId].deliveriesCount += 1;
+      if (
+        ord.deliveredAt &&
+        (!deliveryPartnerMap[dId].lastDeliveryAt ||
+          ord.deliveredAt > deliveryPartnerMap[dId].lastDeliveryAt)
+      ) {
+        deliveryPartnerMap[dId].lastDeliveryAt = ord.deliveredAt;
+      }
+    }
+    const deliveryHistory = Object.values(deliveryPartnerMap).sort(
+      (a, b) => b.deliveriesCount - a.deliveriesCount
+    );
+
+    // COD settlement history for this customer
+    const codOrders = orders.filter((o) => o.paymentMethod === "Cash on delivery");
+    const codHistory = codOrders.map((o) => ({
+      orderId: o._id,
+      orderNumber: o.orderNumber,
+      amountDue: o.codDetails?.amountDue || o.totalAmount,
+      amountCollected:
+        o.codDetails?.amountCollected ??
+        (o.codDetails?.status !== "COD_PENDING" ? o.totalAmount : 0),
+      status: o.codDetails?.status || "COD_PENDING",
+      vendorConfirmed: o.codDetails?.vendorConfirmed || false,
+      discrepancy: o.codDetails?.discrepancy || null,
+      createdAt: o.createdAt,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        customer,
+        metrics: {
+          totalOrders,
+          completedOrders: completedOrders.length,
+          activeOrders: activeOrders.length,
+          cancelledOrders: cancelledOrders.length,
+          totalCompletedSpending,
+          totalRefundedAmount,
+          netSpending,
+          lastPurchaseDate,
+        },
+        orders,
+        mostPurchasedProducts,
+        vendorSpendingSummary,
+        deliveryHistory,
+        codHistory,
+        refunds: maskedRefunds,
+        searchInterests: [],
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
