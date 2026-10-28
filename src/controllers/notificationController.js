@@ -4,6 +4,7 @@ import VendorNotification from "../models/VendorNotification.js";
 import Vendor from "../models/Vendor.js";
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import { AppError } from "../middleware/errorMiddleware.js";
+import { sendPushToUsers, NOTIFICATION_CHANNELS } from "../services/pushNotificationService.js";
 
 /**
  * Register or refresh a push device token for the authenticated user
@@ -278,6 +279,46 @@ export const getUnreadNotificationCount = async (req, res, next) => {
     res.status(200).json({
       success: true,
       unreadCount,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Send an immediate test push notification to verify heads-up pop-up alert
+ * POST /api/notifications/test-push
+ */
+export const testPushNotification = async (req, res, next) => {
+  try {
+    const {
+      title = "🔔 BhansaMart Heads-Up Alert",
+      body = "Your order #1084 has arrived! Tap to open details.",
+      channelId = NOTIFICATION_CHANNELS.ORDERS,
+      data = {},
+    } = req.body;
+
+    const result = await sendPushToUsers({
+      userIds: [req.user._id],
+      title,
+      body,
+      data: {
+        ...data,
+        type: "ORDER_STATUS_UPDATE",
+        orderId: "TEST_ORDER_1084",
+        screen: "orderDetails",
+        test: true,
+      },
+      channelId,
+      sound: "default",
+      priority: "high",
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Test push notification dispatched",
+      channelId,
+      result,
     });
   } catch (error) {
     next(error);

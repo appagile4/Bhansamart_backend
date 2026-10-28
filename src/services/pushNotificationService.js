@@ -10,6 +10,41 @@ const expoClient = new Expo({
   useFcmV1: true,
 });
 
+export const NOTIFICATION_CHANNELS = {
+  ORDERS: "bhansamart_orders_v1",
+  DELIVERY: "bhansamart_delivery_v1",
+  BROADCASTS: "bhansamart_broadcasts_v1",
+  ALERTS: "bhansamart_alerts_v1",
+  DEFAULT: "bhansamart_default_v1",
+};
+
+/**
+ * Normalizes legacy channel names ("orders", "delivery", etc.) to new
+ * MAX-importance heads-up notification channels configured on Android devices.
+ */
+export const normalizeChannelId = (channelId) => {
+  if (!channelId) return NOTIFICATION_CHANNELS.ORDERS;
+  switch (String(channelId).toLowerCase()) {
+    case "orders":
+    case "bhansamart_orders_v1":
+      return NOTIFICATION_CHANNELS.ORDERS;
+    case "delivery":
+    case "bhansamart_delivery_v1":
+      return NOTIFICATION_CHANNELS.DELIVERY;
+    case "broadcasts":
+    case "bhansamart_broadcasts_v1":
+      return NOTIFICATION_CHANNELS.BROADCASTS;
+    case "alerts":
+    case "bhansamart_alerts_v1":
+      return NOTIFICATION_CHANNELS.ALERTS;
+    case "default":
+    case "bhansamart_default_v1":
+      return NOTIFICATION_CHANNELS.DEFAULT;
+    default:
+      return channelId;
+  }
+};
+
 /**
  * Format and sanitize push notification payload
  */
@@ -18,12 +53,13 @@ const buildMessagePayload = ({
   title,
   body,
   data = {},
-  channelId = "default",
+  channelId = NOTIFICATION_CHANNELS.ORDERS,
   sound = "default",
   priority = "high",
   badge = 1,
   ttl = 86400, // 24 hours
 }) => {
+  const targetChannel = normalizeChannelId(channelId);
   return {
     to: token,
     sound: sound || "default",
@@ -34,7 +70,7 @@ const buildMessagePayload = ({
       notificationId: data?.notificationId || `push_${Date.now()}_${Math.random().toString(36).substring(7)}`,
       timestamp: new Date().toISOString(),
     },
-    channelId: channelId || "default",
+    channelId: targetChannel,
     priority: priority || "high",
     badge: typeof badge === "number" ? badge : 1,
     ttl,
@@ -445,6 +481,8 @@ export const dispatchMarketplaceNotification = async ({
 };
 
 export default {
+  NOTIFICATION_CHANNELS,
+  normalizeChannelId,
   sendPushToUsers,
   sendPushToVendors,
   sendPushToDeliveryPartners,

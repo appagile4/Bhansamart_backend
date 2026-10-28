@@ -7,6 +7,7 @@ import {
   markNotificationAsRead,
   markAllNotificationsAsRead,
   getUnreadNotificationCount,
+  testPushNotification,
 } from "../controllers/notificationController.js";
 
 const router = express.Router();
@@ -17,6 +18,9 @@ router.use(protect);
 // 1. Device Token Registration & Cleanup
 router.post("/devices/register", registerDeviceToken);
 router.post("/devices/unregister", unregisterDeviceToken);
+
+// 2. Immediate Push Testing for Heads-Up verification
+router.post("/test-push", testPushNotification);
 
 // 2. User Inboxes & Read Receipts
 router.get("/my", getMyNotifications);
