@@ -119,8 +119,9 @@ export const initSocket = (httpServer) => {
     if (socket.deliveryBoyId) {
       const deliveryRoom = `delivery:${socket.deliveryBoyId}`;
       socket.join(deliveryRoom);
+      socket.join("delivery:portal");
       console.log(
-        `[Socket] Delivery Partner ${socket.deliveryBoyId} joined room ${deliveryRoom}`,
+        `[Socket] Delivery Partner ${socket.deliveryBoyId} joined room ${deliveryRoom} & delivery:portal`,
       );
       emitDeliveryPartnerStatus(socket.deliveryBoyId, {
         availability: "ONLINE",
@@ -366,6 +367,45 @@ export const initSocket = (httpServer) => {
           order.customer?._id?.toString(),
           order,
         );
+
+        import("../services/customerNotificationService.js")
+          .then(({ notifyCustomerOrderCancelled }) => {
+            notifyCustomerOrderCancelled(order, reason).catch(() => {});
+          })
+          .catch(() => {});
+
+        // Clear active dispatch timer and cancel any offered/active assignments
+        import("../utils/dispatchEngine.js")
+          .then(({ clearOrderDispatchTimer }) => {
+            clearOrderDispatchTimer(order._id);
+          })
+          .catch(() => {});
+
+        import("../models/DeliveryAssignment.js")
+          .then(async ({ default: DeliveryAssignment }) => {
+            const activeAssignments = await DeliveryAssignment.find({
+              order: order._id,
+              status: { $in: ["OFFERED", "ACCEPTED"] },
+            });
+            for (const asgn of activeAssignments) {
+              asgn.status = "CANCELLED";
+              await asgn.save();
+              if (asgn.deliveryBoy) {
+                emitToDeliveryPartner(
+                  asgn.deliveryBoy.toString(),
+                  "delivery:order:cancelled",
+                  { orderId: order._id, orderNumber: order.orderNumber, reason }
+                );
+                import("../models/DeliveryBoy.js").then(({ default: DeliveryBoy }) => {
+                  DeliveryBoy.findByIdAndUpdate(asgn.deliveryBoy, {
+                    activeOrderId: null,
+                    availability: "ONLINE",
+                  }).catch(() => {});
+                });
+              }
+            }
+          })
+          .catch(() => {});
 
         if (typeof ack === "function") {
           ack({ success: true, order });
@@ -683,6 +723,17 @@ export const emitNewOrderToVendor = (vendorId, order) => {
 };
 
 /**
+ * Real-time notification helper: Emit in-app notification to specific customer
+ */
+export const emitToCustomerNotification = (customerId, notification) => {
+  if (!io || !customerId) return;
+  const cId = customerId.toString();
+  io.to(`user:${cId}`).emit("notification:direct", notification);
+  io.to(`user:${cId}`).emit("notification", notification);
+  console.log(`[Socket Emitted] Customer notification sent to user:${cId}`);
+};
+
+/**
  * Real-time notification helper: Emit order status change to customer and vendor rooms
  */
 export const emitOrderStatusUpdate = (orderId, customerId, order) => {
@@ -748,6 +799,15 @@ export const emitToDeliveryPartner = (
   console.log(
     `[Socket Emitted] ${event} sent to ${room} (and user:${userId || "none"})`,
   );
+};
+
+/**
+ * Real-time notification helper: Broadcast announcement to all connected delivery boys
+ */
+export const emitToDeliveryPortal = (event, data) => {
+  if (!io) return;
+  io.to("delivery:portal").emit(event, data);
+  console.log(`[Socket Emitted] ${event} sent to delivery:portal`);
 };
 
 /**
@@ -921,5 +981,36 @@ export const notifyStaffAdminsForVendor = async ({
     );
   } catch (err) {
     console.error("[notifyStaffAdminsForVendor] Error:", err.message);
+  }
+};
+
+/**
+ * Real-time notification helper: Emit operational alert to staff & admins
+ */
+export const emitStaffAlert = async ({
+  type = "staff_alert",
+  title = "Staff Alert",
+  message = "",
+  data = {},
+}) => {
+  try {
+    if (data?.vendorId) {
+      await notifyStaffAdminsForVendor({
+        vendorId: data.vendorId,
+        eventType: type,
+        title,
+        message,
+        data,
+      });
+    } else if (io) {
+      io.emit(type, {
+        title,
+        message,
+        data,
+        timestamp: new Date(),
+      });
+    }
+  } catch (err) {
+    console.error("[emitStaffAlert] Error:", err.message);
   }
 };

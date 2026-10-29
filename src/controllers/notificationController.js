@@ -148,15 +148,151 @@ export const getMyNotifications = async (req, res, next) => {
       });
     }
 
+    // Dedicated Delivery Boy Inboxes with Strict Recipient Isolation
+    const isDeliveryBoy =
+      req.user.role === "delivery_boy" ||
+      req.query.role === "delivery" ||
+      req.query.role === "delivery_boy";
+
+    if (isDeliveryBoy) {
+      const deliveryBoyDoc = await DeliveryBoy.findOne({ user: req.user._id }).select("_id");
+      const dId = deliveryBoyDoc?._id;
+
+      const deliveryFilter = {
+        $or: [
+          { user: req.user._id, targetRole: "delivery_boy" },
+          ...(dId ? [{ deliveryBoy: dId }] : []),
+          {
+            user: req.user._id,
+            type: {
+              $in: [
+                "delivery_request_received",
+                "delivery_request_expired",
+                "delivery_assignment_confirmed",
+                "delivery_pickup_reminder",
+                "delivery_handover_otp_available",
+                "delivery_out_for_delivery",
+                "delivery_completed",
+                "delivery_cancelled",
+                "delivery_earnings_updated",
+                "delivery_payout_updated",
+                "delivery_account_verification_updated",
+                "delivery_portal_announcement",
+              ],
+            },
+          },
+          {
+            targetRole: "delivery_boy",
+            type: "delivery_portal_announcement",
+          },
+        ],
+        type: {
+          $nin: [
+            "staff_order",
+            "staff_withdrawal",
+            "staff_brand",
+            "staff_refund",
+            "staff_delivery",
+            "staff_cod",
+            "staff_ticket",
+            "staff_alert",
+            "referral_success",
+            "referral_reward",
+            "welcome_reward",
+            "reward",
+            "offer",
+          ],
+        },
+      };
+
+      if (req.query.category && req.query.category !== "all") {
+        const cat = req.query.category.toLowerCase();
+        if (cat === "delivery") {
+          deliveryFilter.category = "delivery";
+        } else if (cat === "payments" || cat === "earnings") {
+          deliveryFilter.category = "payments";
+        } else if (cat === "account" || cat === "verification") {
+          deliveryFilter.category = "account";
+        } else if (cat === "announcements") {
+          deliveryFilter.category = "announcements";
+        }
+      }
+
+      if (req.query.isRead !== undefined) {
+        deliveryFilter.isRead = req.query.isRead === "true" || req.query.isRead === true;
+      }
+
+      const [notifications, total, unreadCount] = await Promise.all([
+        Notification.find(deliveryFilter)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        Notification.countDocuments(deliveryFilter),
+        Notification.countDocuments({ ...deliveryFilter, isRead: false }),
+      ]);
+
+      return res.status(200).json({
+        success: true,
+        count: notifications.length,
+        total,
+        unreadCount,
+        totalPages: Math.ceil(total / limit),
+        currentPage: page,
+        data: notifications,
+      });
+    }
+
     // Default Customer / Delivery Boy / Admin
+    const isCustomer = req.query.role === "customer" || req.user.role === "customer";
+    const query = { user: req.user._id };
+
+    if (isCustomer) {
+      query.type = {
+        $nin: [
+          "staff_order",
+          "staff_withdrawal",
+          "staff_brand",
+          "staff_refund",
+          "staff_delivery",
+          "staff_cod",
+          "staff_ticket",
+          "staff_alert",
+          "delivery_request_received",
+          "delivery_request_expired",
+          "delivery_assignment_confirmed",
+          "delivery_pickup_reminder",
+          "delivery_handover_otp_available",
+          "delivery_out_for_delivery",
+          "delivery_completed",
+          "delivery_cancelled",
+          "delivery_earnings_updated",
+          "delivery_payout_updated",
+          "delivery_account_verification_updated",
+          "delivery_portal_announcement",
+        ],
+      };
+      query.targetRole = { $ne: "delivery_boy" };
+    }
+
+    if (req.query.type) {
+      query.type = req.query.type;
+    }
+
+    if (req.query.isRead !== undefined) {
+      query.isRead = req.query.isRead === "true" || req.query.isRead === true;
+    }
+
+    const unreadQuery = { ...query, isRead: false };
+
     const [notifications, total, unreadCount] = await Promise.all([
-      Notification.find({ user: req.user._id })
+      Notification.find(query)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      Notification.countDocuments({ user: req.user._id }),
-      Notification.countDocuments({ user: req.user._id, isRead: false }),
+      Notification.countDocuments(query),
+      Notification.countDocuments(unreadQuery),
     ]);
 
     res.status(200).json({
@@ -230,9 +366,46 @@ export const markAllNotificationsAsRead = async (req, res, next) => {
           { $set: { isRead: true, readAt: new Date() } }
         );
       }
+    } else if (
+      req.user.role === "delivery_boy" ||
+      req.query.role === "delivery" ||
+      req.query.role === "delivery_boy"
+    ) {
+      const deliveryBoyDoc = await DeliveryBoy.findOne({ user: req.user._id }).select("_id");
+      const dId = deliveryBoyDoc?._id;
+      const query = {
+        $or: [
+          { user: req.user._id, targetRole: "delivery_boy" },
+          ...(dId ? [{ deliveryBoy: dId }] : []),
+          { user: req.user._id, type: { $regex: /^delivery_/ } },
+        ],
+        isRead: false,
+      };
+      if (req.query.category && req.query.category !== "all") {
+        query.category = req.query.category.toLowerCase();
+      }
+      await Notification.updateMany(query, {
+        $set: { isRead: true, readAt: new Date() },
+      });
     } else {
+      const isCustomer = req.query.role === "customer" || req.user.role === "customer";
+      const query = { user: req.user._id, isRead: false };
+      if (isCustomer) {
+        query.type = {
+          $nin: [
+            "staff_order",
+            "staff_withdrawal",
+            "staff_brand",
+            "staff_refund",
+            "staff_delivery",
+            "staff_cod",
+            "staff_ticket",
+            "staff_alert",
+          ],
+        };
+      }
       await Notification.updateMany(
-        { user: req.user._id, isRead: false },
+        query,
         { $set: { isRead: true, readAt: new Date() } }
       );
     }
@@ -269,11 +442,57 @@ export const getUnreadNotificationCount = async (req, res, next) => {
           isRead: false,
         });
       }
-    } else {
+    } else if (
+      req.user.role === "delivery_boy" ||
+      req.query.role === "delivery" ||
+      req.query.role === "delivery_boy"
+    ) {
+      const deliveryBoyDoc = await DeliveryBoy.findOne({ user: req.user._id }).select("_id");
+      const dId = deliveryBoyDoc?._id;
       unreadCount = await Notification.countDocuments({
-        user: req.user._id,
+        $or: [
+          { user: req.user._id, targetRole: "delivery_boy" },
+          ...(dId ? [{ deliveryBoy: dId }] : []),
+          { user: req.user._id, type: { $regex: /^delivery_/ } },
+          { targetRole: "delivery_boy", type: "delivery_portal_announcement" },
+        ],
+        type: {
+          $nin: [
+            "staff_order",
+            "staff_withdrawal",
+            "staff_brand",
+            "staff_refund",
+            "staff_delivery",
+            "staff_cod",
+            "staff_ticket",
+            "staff_alert",
+            "referral_success",
+            "referral_reward",
+            "welcome_reward",
+            "reward",
+            "offer",
+          ],
+        },
         isRead: false,
       });
+    } else {
+      const isCustomer = req.query.role === "customer" || req.user.role === "customer";
+      const query = { user: req.user._id, isRead: false };
+      if (isCustomer) {
+        query.type = {
+          $nin: [
+            "staff_order",
+            "staff_withdrawal",
+            "staff_brand",
+            "staff_refund",
+            "staff_delivery",
+            "staff_cod",
+            "staff_ticket",
+            "staff_alert",
+          ],
+        };
+      }
+      unreadCount = await Notification.countDocuments(query);
     }
 
     res.status(200).json({

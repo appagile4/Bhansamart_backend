@@ -5,6 +5,7 @@ import http from "http";
 import app from "./app.js";
 import connectDB from "./config/db.js";
 import { initSocket } from "./socket/socketManager.js";
+import { recoverStaleAssignments } from "./utils/dispatchEngine.js";
 
 // Handle uncaught exceptions across the application
 process.on("uncaughtException", (err) => {
@@ -23,6 +24,16 @@ const server = http.createServer(app);
 
 // Initialize Socket.IO with unified HTTP Server
 initSocket(server);
+
+// Background recovery for stale delivery assignments across server restarts
+setTimeout(() => {
+  recoverStaleAssignments().catch((err) =>
+    console.warn("[Recovery Stale Assignments warning]:", err.message)
+  );
+  setInterval(() => {
+    recoverStaleAssignments().catch(() => {});
+  }, 60000);
+}, 5000);
 
 server.listen(PORT, HOST, () => {
   console.log(

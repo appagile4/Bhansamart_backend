@@ -23,6 +23,7 @@ router.post("/devices/unregister", unregisterDeviceToken);
 router.post("/test-push", testPushNotification);
 
 // 2. User Inboxes & Read Receipts
+router.get("/", getMyNotifications);
 router.get("/my", getMyNotifications);
 router.get("/unread-count", getUnreadNotificationCount);
 router.patch("/:id/read", markNotificationAsRead);

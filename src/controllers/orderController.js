@@ -18,8 +18,18 @@ import {
   emitNewOrderToVendor,
   emitOrderStatusUpdate,
   emitVendorNotification,
+  emitToDeliveryPartner,
 } from "../socket/socketManager.js";
-import { dispatchOrderToNearestPartner } from "../utils/dispatchEngine.js";
+import {
+  dispatchOrderToNearestPartner,
+  clearOrderDispatchTimer,
+} from "../utils/dispatchEngine.js";
+import {
+  notifyCustomerOrderPlaced,
+  notifyCustomerOrderOutForDelivery,
+  notifyCustomerOrderDelivered,
+  notifyCustomerOrderCancelled,
+} from "../services/customerNotificationService.js";
 
 /**
  * Helper to resolve Vendor for logged-in vendor user
@@ -318,18 +328,8 @@ export const createOrder = async (req, res, next) => {
       priority: "high",
     }).catch(() => {});
 
-    sendPushToUsers({
-      userIds: [customerId],
-      title: "Order Placed Successfully! 🎉",
-      body: `Your order #${newOrder.orderNumber} has been received and sent to the store.`,
-      data: {
-        orderId: newOrder._id.toString(),
-        orderNumber: newOrder.orderNumber,
-        screen: "OrderTrackingScreen",
-        type: "ORDER_CREATED",
-      },
-      channelId: "orders",
-    }).catch(() => {});
+    // 11. Customer Notification: Order Placed Successfully (In-App, Push & Socket)
+    await notifyCustomerOrderPlaced(populatedOrder);
 
     // Emit to customer's personal channel
     emitOrderStatusUpdate(
@@ -820,29 +820,15 @@ export const updateOrderStatus = async (req, res, next) => {
       emitVendorNotification(vId.toString(), vendorNotif);
       const custId = updatedOrder.customer?._id || updatedOrder.customer;
       if (custId) {
-        const customerMsgMap = {
-          ACCEPTED: "Your order has been confirmed by the store and is being prepared.",
-          PREPARING: "Your order is currently being prepared by the store.",
-          READY_FOR_PICKUP: "Your order is ready and waiting for delivery partner pickup.",
-          OUT_FOR_DELIVERY: "Your order is out for delivery with our rider! 🛵",
-          DELIVERED: "Your order has been successfully delivered. Enjoy! 📦",
-          CANCELLED: `Your order was cancelled.${reason ? " Reason: " + reason : ""}`,
-          REJECTED: `Your order could not be accepted.${reason ? " Reason: " + reason : ""}`,
-        };
-        const pushBody = customerMsgMap[status] || `Your order status changed to ${status}.`;
-        sendPushToUsers({
-          userIds: [custId],
-          title: `Order #${updatedOrder.orderNumber}: ${status.replace(/_/g, " ")}`,
-          body: pushBody,
-          data: {
-            orderId: updatedOrder._id.toString(),
-            orderNumber: updatedOrder.orderNumber,
-            orderStatus: status,
-            screen: "OrderTrackingScreen",
-            type: "ORDER_STATUS_CHANGED",
-          },
-          channelId: "orders",
-        }).catch(() => {});
+        if (status === "OUT_FOR_DELIVERY") {
+          await notifyCustomerOrderOutForDelivery(updatedOrder, updatedOrder.assignedDeliveryBoy);
+        } else if (status === "DELIVERED") {
+          await notifyCustomerOrderDelivered(updatedOrder);
+        } else if (status === "CANCELLED" || status === "REJECTED") {
+          await notifyCustomerOrderCancelled(updatedOrder, reason);
+        }
+        // NOTE: ACCEPTED, PREPARING, and READY_FOR_PICKUP intentionally DO NOT generate
+        // customer notifications or push notifications per strict requirement.
       }
     }
 
@@ -851,6 +837,30 @@ export const updateOrderStatus = async (req, res, next) => {
       dispatchOrderToNearestPartner(updatedOrder._id).catch((dispatchErr) => {
         console.warn("[Auto-dispatch error]:", dispatchErr.message);
       });
+    }
+
+    // If order is cancelled or rejected, immediately halt active dispatch timers and cancel assignments
+    if (status === "CANCELLED" || status === "REJECTED") {
+      clearOrderDispatchTimer(updatedOrder._id);
+      const activeAssignments = await DeliveryAssignment.find({
+        order: updatedOrder._id,
+        status: { $in: ["OFFERED", "ACCEPTED"] },
+      });
+      for (const asgn of activeAssignments) {
+        asgn.status = "CANCELLED";
+        await asgn.save();
+        if (asgn.deliveryBoy) {
+          emitToDeliveryPartner(
+            asgn.deliveryBoy.toString(),
+            "delivery:order:cancelled",
+            { orderId: updatedOrder._id, orderNumber: updatedOrder.orderNumber, reason }
+          );
+          await DeliveryBoy.findByIdAndUpdate(asgn.deliveryBoy, {
+            activeOrderId: null,
+            availability: "ONLINE",
+          });
+        }
+      }
     }
 
     return res.status(200).json({
@@ -928,11 +938,45 @@ export const cancelCustomerOrder = async (req, res, next) => {
     // Real-time broadcast
     emitOrderStatusUpdate(order._id.toString(), customerId.toString(), order);
 
-    // Cancel any active delivery assignments
-    await DeliveryAssignment.updateMany(
-      { order: order._id, status: { $in: ["OFFERED", "ACCEPTED"] } },
-      { $set: { status: "REJECTED" } }
-    );
+    // Notify customer that order is cancelled (In-App, Push & Socket)
+    await notifyCustomerOrderCancelled(order, reason);
+
+    // Cancel active delivery assignments and free rider
+    const { clearOrderDispatchTimer } = await import("../utils/dispatchEngine.js");
+    clearOrderDispatchTimer(order._id);
+
+    const activeAssignments = await DeliveryAssignment.find({
+      order: order._id,
+      status: { $in: ["OFFERED", "ACCEPTED"] },
+    });
+
+    for (const asgn of activeAssignments) {
+      asgn.status = "CANCELLED";
+      await asgn.save();
+
+      if (asgn.deliveryBoy) {
+        emitToDeliveryPartner(
+          asgn.deliveryBoy.toString(),
+          "delivery:order:cancelled",
+          { orderId: order._id, orderNumber: order.orderNumber, reason }
+        );
+
+        const { createDeliveryNotification } = await import("../services/deliveryNotificationService.js");
+        await createDeliveryNotification({
+          deliveryBoyId: asgn.deliveryBoy,
+          type: "delivery_cancelled",
+          title: "Order Cancelled",
+          message: `Order #${order.orderNumber} was cancelled by customer.`,
+          data: { orderId: order._id.toString(), orderNumber: order.orderNumber },
+          category: "delivery",
+        });
+
+        await DeliveryBoy.findByIdAndUpdate(asgn.deliveryBoy, {
+          activeOrderId: null,
+          availability: "ONLINE",
+        });
+      }
+    }
 
     return res.status(200).json({
       success: true,

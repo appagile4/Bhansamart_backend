@@ -11,7 +11,7 @@ const deliveryAssignmentSchema = new mongoose.Schema(
     deliveryBoy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "DeliveryBoy",
-      required: true,
+      required: false,
       index: true,
     },
     vendor: {
@@ -29,9 +29,64 @@ const deliveryAssignmentSchema = new mongoose.Schema(
         "TIMED_OUT",
         "CANCELLED",
         "COMPLETED",
+        "UNASSIGNED_ESCALATED",
       ],
       default: "OFFERED",
       index: true,
+    },
+    attemptCount: {
+      type: Number,
+      default: 1,
+    },
+    maxRetries: {
+      type: Number,
+      default: 5,
+    },
+    attempts: [
+      {
+        deliveryBoy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "DeliveryBoy",
+        },
+        offeredAt: { type: Date, default: Date.now },
+        respondedAt: { type: Date },
+        status: {
+          type: String,
+          enum: ["OFFERED", "ACCEPTED", "REJECTED", "TIMED_OUT", "SKIPPED"],
+        },
+        reason: { type: String, default: "" },
+        distanceKm: { type: Number, default: 0 },
+        searchTier: {
+          type: String,
+          enum: ["PRIORITY_1", "PRIORITY_2_EXPANDED", "PRIORITY_3_MAX"],
+          default: "PRIORITY_1",
+        },
+      },
+    ],
+    notifiedRiders: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "DeliveryBoy",
+      },
+    ],
+    declinedRiders: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "DeliveryBoy",
+      },
+    ],
+    timedOutRiders: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "DeliveryBoy",
+      },
+    ],
+    failureReason: {
+      type: String,
+      default: "",
+    },
+    nextRetryAt: {
+      type: Date,
     },
     offeredAt: {
       type: Date,
@@ -39,7 +94,7 @@ const deliveryAssignmentSchema = new mongoose.Schema(
     },
     expiresAt: {
       type: Date,
-      required: true,
+      required: false,
       index: true,
     },
     acceptedAt: {
@@ -51,6 +106,9 @@ const deliveryAssignmentSchema = new mongoose.Schema(
     rejectionReason: {
       type: String,
       default: "",
+    },
+    completedAt: {
+      type: Date,
     },
     estimatedEarnings: {
       type: Number,
@@ -84,6 +142,8 @@ const deliveryAssignmentSchema = new mongoose.Schema(
 
 deliveryAssignmentSchema.index({ deliveryBoy: 1, status: 1 });
 deliveryAssignmentSchema.index({ order: 1, status: 1 });
+deliveryAssignmentSchema.index({ order: 1, vendor: 1 });
+deliveryAssignmentSchema.index({ order: 1, createdAt: -1 });
 
 const DeliveryAssignment =
   mongoose.models.DeliveryAssignment ||

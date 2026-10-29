@@ -16,7 +16,15 @@ import {
 import {
   verifyHashedOTP,
   dispatchOrderToNearestPartner,
+  clearOrderDispatchTimer,
 } from "../utils/dispatchEngine.js";
+import { createDeliveryNotification } from "../services/deliveryNotificationService.js";
+import {
+  notifyCustomerOrderPickedUp,
+  notifyCustomerOrderOutForDelivery,
+  notifyCustomerOrderDelivered,
+  notifyCustomerOrderCancelled,
+} from "../services/customerNotificationService.js";
 import {
   emitOrderStatusUpdate,
   emitToOrderRoom,
@@ -170,10 +178,50 @@ export const acceptAssignment = async (req, res, next) => {
       return next(new AppError("Order has already been assigned to another partner", 409));
     }
 
+    // Cancel active dispatch timer
+    clearOrderDispatchTimer(order._id);
+
+    // Update attempt history in assignment
+    if (assignment.attempts && assignment.attempts.length > 0) {
+      const lastAttempt = assignment.attempts[assignment.attempts.length - 1];
+      if (lastAttempt && lastAttempt.deliveryBoy?.toString() === deliveryBoy._id.toString()) {
+        lastAttempt.status = "ACCEPTED";
+        lastAttempt.respondedAt = new Date();
+        await assignment.save();
+      }
+    }
+
     // Mark delivery partner as BUSY
     deliveryBoy.availability = "BUSY";
     deliveryBoy.activeOrderId = order._id;
     await deliveryBoy.save();
+
+    // Persistent delivery confirmation notification
+    await createDeliveryNotification({
+      deliveryBoyId: deliveryBoy._id,
+      userId: req.user._id,
+      type: "delivery_assignment_confirmed",
+      title: "Delivery Assignment Confirmed! 🛵",
+      message: `Order #${order.orderNumber} is assigned to you. Proceed to store for pickup.`,
+      data: {
+        orderId: order._id.toString(),
+        assignmentId: assignment._id.toString(),
+        orderNumber: order.orderNumber,
+        screen: "DeliveryMain",
+      },
+      category: "delivery",
+    });
+
+    emitToDeliveryPartner(
+      deliveryBoy._id.toString(),
+      "delivery:assignment:confirmed",
+      {
+        assignmentId: assignment._id,
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+      },
+      req.user._id.toString()
+    );
 
     // Broadcast update via socket
     emitOrderStatusUpdate(order._id.toString(), order.customer?._id?.toString(), order);
@@ -226,6 +274,9 @@ export const rejectAssignment = async (req, res, next) => {
           rejectedAt: new Date(),
           rejectionReason: reason,
         },
+        $push: {
+          declinedRiders: deliveryBoy._id,
+        },
       },
       { returnDocument: "after" }
     );
@@ -233,6 +284,14 @@ export const rejectAssignment = async (req, res, next) => {
     if (!assignment) {
       return next(new AppError("Assignment not found or offer is no longer valid", 404));
     }
+
+    clearOrderDispatchTimer(assignment.order);
+
+    // Update attempts array
+    await DeliveryAssignment.updateOne(
+      { _id: assignment._id, "attempts.deliveryBoy": deliveryBoy._id, "attempts.status": "OFFERED" },
+      { $set: { "attempts.$.status": "REJECTED", "attempts.$.respondedAt": new Date(), "attempts.$.reason": reason } }
+    );
 
     console.log(
       `[Assignment] Partner ${deliveryBoy.fullName} rejected order ${assignment.order}. Re-dispatching to next candidate...`
@@ -285,6 +344,20 @@ export const markArrivedAtStore = async (req, res, next) => {
     emitToOrderRoom(order._id.toString(), "delivery:arrived_store", {
       orderId: order._id,
       timestamp: order.arrivedAtStoreAt,
+    });
+
+    await createDeliveryNotification({
+      deliveryBoyId: deliveryBoy._id,
+      userId: req.user._id,
+      type: "delivery_pickup_reminder",
+      title: "Store Arrival Recorded 🏪",
+      message: `You arrived at store. Request the 4-digit Pickup OTP from store counter for order #${order.orderNumber}.`,
+      data: {
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber,
+        screen: "DeliveryMain",
+      },
+      category: "delivery",
     });
 
     res.status(200).json({
@@ -380,18 +453,9 @@ export const verifyPickupOtp = async (req, res, next) => {
       orderStatus: "OUT_FOR_DELIVERY",
     });
 
-    sendPushToUsers({
-      userIds: [order.customer?._id || order.customer],
-      title: "Order Picked Up! 🛵",
-      body: `Your order #${order.orderNumber} has been collected by ${deliveryBoy.fullName} and is on its way to you.`,
-      data: {
-        orderId: order._id.toString(),
-        orderNumber: order.orderNumber,
-        screen: "OrderTrackingScreen",
-        type: "OUT_FOR_DELIVERY",
-      },
-      channelId: "orders",
-    }).catch(() => {});
+    // Notify customer: Order Picked Up & Out for Delivery (In-App, Push & Socket)
+    await notifyCustomerOrderPickedUp(order, deliveryBoy);
+    await notifyCustomerOrderOutForDelivery(order, deliveryBoy);
 
     if (order.vendor) {
       const vId = order.vendor._id || order.vendor;
@@ -408,6 +472,20 @@ export const verifyPickupOtp = async (req, res, next) => {
       });
       emitVendorNotification(vId.toString(), vendorNotif);
     }
+
+    await createDeliveryNotification({
+      deliveryBoyId: deliveryBoy._id,
+      userId: req.user._id,
+      type: "delivery_out_for_delivery",
+      title: "Out for Delivery 🛵",
+      message: `Package collected for #${order.orderNumber}. Head to customer delivery address.`,
+      data: {
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber,
+        screen: "DeliveryMain",
+      },
+      category: "delivery",
+    });
 
     res.status(200).json({
       success: true,
@@ -639,6 +717,39 @@ export const verifyDeliveryOtp = async (req, res, next) => {
       earningsEarned: totalEarnings,
     });
 
+    // Customer Notification: Order Delivered Successfully (In-App, Push & Socket)
+    await notifyCustomerOrderDelivered(order);
+
+    // Dedicated Delivery & Earnings Notifications for Rider
+    await createDeliveryNotification({
+      deliveryBoyId: deliveryBoy._id,
+      userId: req.user._id,
+      type: "delivery_completed",
+      title: "Delivery Completed Successfully! 🎉",
+      message: `Order #${order.orderNumber} delivered to customer. Great job!`,
+      data: {
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber,
+        screen: "DeliveryMain",
+      },
+      category: "delivery",
+    });
+
+    await createDeliveryNotification({
+      deliveryBoyId: deliveryBoy._id,
+      userId: req.user._id,
+      type: "delivery_earnings_updated",
+      title: "Delivery Earnings Credited 💰",
+      message: `+NPR ${totalEarnings} credited to your Delivery Wallet for #${order.orderNumber}.`,
+      data: {
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber,
+        screen: "DeliveryMain/wallet",
+        amount: totalEarnings,
+      },
+      category: "payments",
+    });
+
     res.status(200).json({
       success: true,
       message: "Order delivered successfully! Earnings credited to your wallet.",
@@ -702,6 +813,20 @@ export const cancelActiveDelivery = async (req, res, next) => {
     deliveryBoy.availability = "ONLINE";
     await deliveryBoy.save();
 
+    await createDeliveryNotification({
+      deliveryBoyId: deliveryBoy._id,
+      userId: req.user._id,
+      type: "delivery_cancelled",
+      title: "Delivery Cancelled",
+      message: `Delivery for #${order.orderNumber} was cancelled (${reason}). Return package to store.`,
+      data: {
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber,
+        screen: "DeliveryMain",
+      },
+      category: "delivery",
+    });
+
     // Increment delivery cancellation attempt counter
     order.deliveryCancellationCount = (order.deliveryCancellationCount || 0) + 1;
     order.cancellationDetails.push({
@@ -740,6 +865,7 @@ export const cancelActiveDelivery = async (req, res, next) => {
 
       // Notify vendor and customer in real-time
       emitOrderStatusUpdate(order._id.toString(), order.customer?._id?.toString(), order);
+      await notifyCustomerOrderCancelled(order, order.rejectionReason);
       emitToOrderRoom(order._id.toString(), "order:delivery:failed_permanent", {
         orderId: order._id,
         orderNumber: order.orderNumber,

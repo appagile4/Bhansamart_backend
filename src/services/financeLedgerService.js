@@ -932,6 +932,14 @@ export async function processOrderRefund(arg1 = {}, arg2 = {}) {
     order
   );
 
+  // Customer Notification: Refund Completed (Idempotent)
+  try {
+    const { notifyCustomerRefundStatusUpdated } = await import("./customerNotificationService.js");
+    await notifyCustomerRefundStatusUpdated(order, refundRecord, "COMPLETED");
+  } catch (notifErr) {
+    console.warn("[Refund Customer Notification Warning]:", notifErr.message);
+  }
+
   return {
     success: true,
     alreadyProcessed: false,

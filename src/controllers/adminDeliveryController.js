@@ -2,6 +2,7 @@ import DeliveryBoy from "../models/DeliveryBoy.js";
 import User from "../models/User.js";
 import SecurityDepositLedger from "../models/SecurityDepositLedger.js";
 import { AppError } from "../middleware/errorMiddleware.js";
+import { createDeliveryNotification } from "../services/deliveryNotificationService.js";
 
 /**
  * List all delivery partners with filters
@@ -140,6 +141,19 @@ export const reviewPartnerDocument = async (req, res, next) => {
     partner.documents[documentType] = doc;
     await partner.save();
 
+    await createDeliveryNotification({
+      deliveryBoyId: partner._id,
+      userId: partner.user,
+      type: "delivery_account_verification_updated",
+      title: `KYC Document: ${documentType}`,
+      message:
+        status === "VERIFIED"
+          ? `Your ${documentType} has been verified successfully.`
+          : `Your ${documentType} was marked as ${status}. ${rejectionReason || ""}`,
+      data: { documentType, status, screen: "DeliveryMain/profile" },
+      category: "account",
+    });
+
     res.status(200).json({
       success: true,
       message: `${documentType} status updated to ${status}`,
@@ -226,6 +240,19 @@ export const updatePartnerApproval = async (req, res, next) => {
     }
 
     await partner.save();
+
+    await createDeliveryNotification({
+      deliveryBoyId: partner._id,
+      userId: partner.user,
+      type: "delivery_account_verification_updated",
+      title: `Account Approval: ${approvalStatus}`,
+      message:
+        approvalStatus === "APPROVED"
+          ? "Congratulations! Your partner account is approved. You can now go ONLINE to receive deliveries."
+          : `Your partner account status is now ${approvalStatus}. ${adminRemarks || ""}`,
+      data: { approvalStatus, screen: "DeliveryMain/profile" },
+      category: "account",
+    });
 
     res.status(200).json({
       success: true,
@@ -323,6 +350,19 @@ export const processDepositRefund = async (req, res, next) => {
     partner.approvalStatus = "DEACTIVATED";
     partner.availability = "OFFLINE";
     await partner.save();
+
+    await createDeliveryNotification({
+      deliveryBoyId: partner._id,
+      userId: partner.user,
+      type: "delivery_account_verification_updated",
+      title: `Account Approval: ${approvalStatus}`,
+      message:
+        approvalStatus === "APPROVED"
+          ? "Congratulations! Your partner account is approved. You can now go ONLINE to receive deliveries."
+          : `Your partner account status is now ${approvalStatus}. ${adminRemarks || ""}`,
+      data: { approvalStatus, screen: "DeliveryMain/profile" },
+      category: "account",
+    });
 
     res.status(200).json({
       success: true,

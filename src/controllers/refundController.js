@@ -7,6 +7,7 @@ import { AppError } from "../middleware/errorMiddleware.js";
 import { processOrderRefund, processReturnPickupAccounting } from "../services/financeLedgerService.js";
 import { generateNumericOTP } from "../utils/generateOTP.js";
 import { emitOrderStatusUpdate, notifyStaffAdminsForVendor } from "../socket/socketManager.js";
+import { notifyCustomerRefundStatusUpdated } from "../services/customerNotificationService.js";
 
 /**
  * @desc    Customer submits a Cancellation, Return, Refund or Replacement request
@@ -252,6 +253,9 @@ export const requestRefund = async (req, res, next) => {
     orderObj.refundDetails = refund.toObject ? refund.toObject() : refund;
     emitOrderStatusUpdate(order._id.toString(), customerId.toString(), orderObj);
 
+    // Customer Notification: Refund Status Updated (Requested)
+    await notifyCustomerRefundStatusUpdated(order, refund, "REQUESTED", reason);
+
     // Scoped Real-time alert to StaffAdmins assigned to this vendor
     await notifyStaffAdminsForVendor({
       vendorId: order.vendor._id,
@@ -447,6 +451,14 @@ export const vendorDirectRefundPayout = async (req, res, next) => {
       refundDetails: updatedRefund.toObject(),
     });
 
+    // Customer Notification: Refund Completed (Vendor Direct Payout)
+    await notifyCustomerRefundStatusUpdated(
+      order,
+      updatedRefund,
+      "COMPLETED",
+      `Direct payout via ${paymentMethod}. Reference: ${cleanRef}`
+    );
+
     await notifyStaffAdminsForVendor({
       vendorId: vendor._id,
       eventType: "staff_refund:vendor_paid",
@@ -571,6 +583,14 @@ export const superAdminProcessOnlineRefund = async (req, res, next) => {
       });
       await refund.save();
 
+      // Customer Notification: Refund Processing
+      await notifyCustomerRefundStatusUpdated(
+        refund.order,
+        refund,
+        "PROCESSING",
+        `Online payout initiated. Reference: ${cleanRef}`
+      );
+
       return res.status(200).json({
         success: true,
         message: "Online refund marked as processing.",
@@ -622,6 +642,14 @@ export const superAdminProcessOnlineRefund = async (req, res, next) => {
       ...(refund.order.toObject ? refund.order.toObject() : refund.order),
       refundDetails: updatedRefund.toObject ? updatedRefund.toObject() : updatedRefund,
     });
+
+    // Customer Notification: Refund Completed (Online Gateway Payout)
+    await notifyCustomerRefundStatusUpdated(
+      refund.order,
+      updatedRefund,
+      "COMPLETED",
+      `Online payout of NPR ${refund.amount} completed. Reference: ${cleanRef}`
+    );
 
     res.status(200).json({
       success: true,
@@ -890,6 +918,9 @@ export const approveRefund = async (req, res, next) => {
       );
     }
 
+    // Customer Notification: Refund Approved
+    await notifyCustomerRefundStatusUpdated(freshOrder || order, refund, "APPROVED", adminNotes);
+
     res.status(200).json({
       success: true,
       message: `${refund.claimType} approved and financial ledger adjusted successfully.`,
@@ -957,6 +988,14 @@ export const rejectRefund = async (req, res, next) => {
         updatedOrder._id.toString(),
         updatedOrder.customer?._id?.toString(),
         orderObj
+      );
+
+      // Customer Notification: Refund Rejected
+      await notifyCustomerRefundStatusUpdated(
+        updatedOrder,
+        refund,
+        "REJECTED",
+        rejectionReason.trim()
       );
     }
 
