@@ -7,6 +7,7 @@ import {
   removeFromCart,
   clearCart,
   syncCart,
+  validateCartDelivery,
 } from "../controllers/cartController.js";
 
 const router = express.Router();
@@ -20,5 +21,6 @@ router.route("/update-quantity").put(updateCartItemQuantity);
 router.route("/remove/:productId").delete(removeFromCart);
 router.route("/clear").delete(clearCart);
 router.route("/sync").post(syncCart);
+router.route("/validate-delivery").post(validateCartDelivery);
 
 export default router;

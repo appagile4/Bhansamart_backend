@@ -68,7 +68,19 @@ app.use(
 // 3. Global General Rate Limiter
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300, // Limit each IP to 300 requests per 15 min
+  max: process.env.NODE_ENV === "production" ? 1000 : 100000,
+  skip: (req) => {
+    // In development or local/private networks, bypass throttling
+    if (process.env.NODE_ENV !== "production") return true;
+    const ip = req.ip || req.connection?.remoteAddress || "";
+    return (
+      ip === "127.0.0.1" ||
+      ip === "::1" ||
+      ip.includes("192.168.") ||
+      ip.includes("10.") ||
+      ip.includes("172.")
+    );
+  },
   standardHeaders: true,
   legacyHeaders: false,
   message: {

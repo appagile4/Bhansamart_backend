@@ -1,4 +1,8 @@
 import Cart from "../models/Cart.js";
+import Product from "../models/Product.js";
+import Vendor from "../models/Vendor.js";
+import Address from "../models/Address.js";
+import { calculateDistanceKm } from "../utils/dispatchEngine.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 
 /**
@@ -285,6 +289,172 @@ export const syncCart = async (req, res, next) => {
       success: true,
       message: "Cart synced successfully",
       data: formatCartResponse(cart),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Validate cart delivery availability and compute dynamic vendor distance & delivery estimate
+ * @route   POST /api/cart/validate-delivery
+ * @access  Private
+ */
+export const validateCartDelivery = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { latitude, longitude, addressId, items: clientItems } = req.body;
+
+    let custLat = parseFloat(latitude);
+    let custLng = parseFloat(longitude);
+
+    // If coordinates were not explicitly passed, attempt to resolve from addressId or default saved address
+    if (isNaN(custLat) || isNaN(custLng)) {
+      if (addressId) {
+        const addr = await Address.findOne({ _id: addressId, user: userId });
+        if (addr && addr.latitude != null && addr.longitude != null) {
+          custLat = parseFloat(addr.latitude);
+          custLng = parseFloat(addr.longitude);
+        }
+      } else {
+        const defAddr = await Address.findOne({ user: userId, isDefault: true });
+        if (defAddr && defAddr.latitude != null && defAddr.longitude != null) {
+          custLat = parseFloat(defAddr.latitude);
+          custLng = parseFloat(defAddr.longitude);
+        }
+      }
+    }
+
+    // Determine cart items (either provided in payload or fetched from user's server cart)
+    let cartItems = Array.isArray(clientItems) && clientItems.length > 0 ? clientItems : [];
+    if (cartItems.length === 0) {
+      const cart = await Cart.findOne({ user: userId });
+      if (cart && Array.isArray(cart.items)) {
+        cartItems = cart.items;
+      }
+    }
+
+    if (cartItems.length === 0) {
+      return res.status(200).json({
+        success: true,
+        allDeliverable: true,
+        customerLocation: { latitude: custLat, longitude: custLng },
+        vendorEstimates: [],
+      });
+    }
+
+    // Resolve products from DB
+    const productIds = cartItems
+      .map((it) => it.productId || it.id || it._id)
+      .filter((id) => id && String(id).match(/^[0-9a-fA-F]{24}$/));
+
+    const dbProducts = await Product.find({
+      _id: { $in: productIds },
+      isDeleted: false,
+    })
+      .populate(
+        "vendor",
+        "businessDetails.businessName shippingLocations location deliveryRadiusKm isStoreOpen status"
+      )
+      .lean();
+
+    // Group items by vendor
+    const vendorMap = new Map();
+
+    for (const item of cartItems) {
+      const pId = String(item.productId || item.id || item._id);
+      const prod = dbProducts.find((p) => String(p._id) === pId);
+      if (!prod || !prod.vendor) continue;
+
+      const vendor = prod.vendor;
+      const vendorId = String(vendor._id || vendor.id);
+
+      if (!vendorMap.has(vendorId)) {
+        vendorMap.set(vendorId, {
+          vendor,
+          items: [],
+        });
+      }
+
+      vendorMap.get(vendorId).items.push({
+        productId: pId,
+        name: prod.name,
+        price: prod.price,
+        quantity: item.quantity || 1,
+        imageUrl: prod.images?.[0]?.url || item.imageUrl || "",
+      });
+    }
+
+    const hasCustomerCoords = !isNaN(custLat) && !isNaN(custLng);
+    const vendorEstimates = [];
+
+    for (const [vendorId, entry] of vendorMap.entries()) {
+      const vendor = entry.vendor;
+      const vLat = parseFloat(
+        vendor.shippingLocations?.latitude ?? vendor.location?.coordinates?.[1]
+      );
+      const vLng = parseFloat(
+        vendor.shippingLocations?.longitude ?? vendor.location?.coordinates?.[0]
+      );
+      const radiusKm = Number(vendor.deliveryRadiusKm) || 5;
+      const storeName = vendor.businessDetails?.businessName || "Partner Store";
+      const isStoreOpen =
+        vendor.isStoreOpen !== false &&
+        ["approved", "active"].includes(vendor.status);
+
+      let distanceKm = 0;
+      let isWithinRadius = false;
+      let estimatedDelivery = "15–25 mins";
+
+      if (hasCustomerCoords && !isNaN(vLat) && !isNaN(vLng)) {
+        distanceKm = calculateDistanceKm(custLat, custLng, vLat, vLng);
+        isWithinRadius = distanceKm <= radiusKm;
+
+        // Dynamic Blinkit-style delivery time calculation
+        const minMins = Math.max(10, Math.round(8 + distanceKm * 2.5));
+        const maxMins = minMins + 10;
+        estimatedDelivery = `${minMins}–${maxMins} mins`;
+      } else {
+        isWithinRadius = true;
+      }
+
+      let isDeliverable = true;
+      let reason = null;
+
+      if (!isStoreOpen) {
+        isDeliverable = false;
+        reason = "Store is currently closed.";
+      } else if (hasCustomerCoords && !isWithinRadius) {
+        isDeliverable = false;
+        reason = "Sorry, this store does not deliver to your selected location.";
+      }
+
+      vendorEstimates.push({
+        vendorId,
+        storeName,
+        distanceKm,
+        deliveryRadiusKm: radiusKm,
+        estimatedDelivery,
+        isDeliverable,
+        isStoreOpen,
+        reason,
+        items: entry.items,
+      });
+    }
+
+    const allDeliverable =
+      vendorEstimates.length > 0 &&
+      vendorEstimates.every((v) => v.isDeliverable);
+
+    res.status(200).json({
+      success: true,
+      allDeliverable,
+      hasMultipleVendors: vendorEstimates.length > 1,
+      customerLocation: {
+        latitude: hasCustomerCoords ? custLat : null,
+        longitude: hasCustomerCoords ? custLng : null,
+      },
+      vendorEstimates,
     });
   } catch (error) {
     next(error);

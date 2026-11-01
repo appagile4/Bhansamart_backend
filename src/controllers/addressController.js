@@ -55,8 +55,18 @@ export const getAddressById = async (req, res, next) => {
  */
 export const createAddress = async (req, res, next) => {
   try {
-    const { type, addressLine, houseNo, street, city, landmark, phone, isDefault } =
-      req.body;
+    const {
+      type,
+      addressLine,
+      houseNo,
+      street,
+      city,
+      landmark,
+      phone,
+      isDefault,
+      latitude,
+      longitude,
+    } = req.body;
 
     if (!addressLine && !houseNo) {
       return next(
@@ -83,6 +93,9 @@ export const createAddress = async (req, res, next) => {
       );
     }
 
+    const parsedLat = latitude != null && !isNaN(Number(latitude)) ? Number(latitude) : null;
+    const parsedLng = longitude != null && !isNaN(Number(longitude)) ? Number(longitude) : null;
+
     const newAddress = await Address.create({
       user: req.user._id,
       type: type || "Home",
@@ -93,6 +106,8 @@ export const createAddress = async (req, res, next) => {
       landmark: landmark || "",
       phone: phone || req.user.phone || "",
       isDefault: shouldBeDefault,
+      latitude: parsedLat,
+      longitude: parsedLng,
     });
 
     res.status(201).json({
@@ -121,8 +136,18 @@ export const updateAddress = async (req, res, next) => {
       return next(new AppError("Address not found", 404));
     }
 
-    const { type, addressLine, houseNo, street, city, landmark, phone, isDefault } =
-      req.body;
+    const {
+      type,
+      addressLine,
+      houseNo,
+      street,
+      city,
+      landmark,
+      phone,
+      isDefault,
+      latitude,
+      longitude,
+    } = req.body;
 
     if (isDefault) {
       await Address.updateMany(
@@ -140,6 +165,12 @@ export const updateAddress = async (req, res, next) => {
     if (city !== undefined) address.city = city;
     if (landmark !== undefined) address.landmark = landmark;
     if (phone) address.phone = phone;
+    if (latitude !== undefined) {
+      address.latitude = latitude != null && !isNaN(Number(latitude)) ? Number(latitude) : null;
+    }
+    if (longitude !== undefined) {
+      address.longitude = longitude != null && !isNaN(Number(longitude)) ? Number(longitude) : null;
+    }
 
     if (addressLine) {
       address.addressLine = addressLine;
