@@ -23,6 +23,7 @@ import {
 import {
   dispatchOrderToNearestPartner,
   clearOrderDispatchTimer,
+  calculateDistanceKm,
 } from "../utils/dispatchEngine.js";
 import {
   notifyCustomerOrderPlaced,
@@ -96,6 +97,8 @@ export const createOrder = async (req, res, next) => {
           landmark: savedAddress.landmark || "",
           phone: savedAddress.phone,
           type: savedAddress.type || "Home",
+          latitude: savedAddress.latitude,
+          longitude: savedAddress.longitude,
         };
       }
     }
@@ -147,6 +150,39 @@ export const createOrder = async (req, res, next) => {
       return next(
         new AppError("The selected store is currently not taking orders.", 400)
       );
+    }
+
+    // ── Geospatial Delivery Radius Validation ───────────────────────────
+    const custLat = parseFloat(
+      resolvedAddress.latitude ?? resolvedAddress.lat
+    );
+    const custLng = parseFloat(
+      resolvedAddress.longitude ?? resolvedAddress.lng
+    );
+
+    const vendorLat = parseFloat(
+      vendor.shippingLocations?.latitude ??
+      vendor.location?.coordinates?.[1]
+    );
+    const vendorLng = parseFloat(
+      vendor.shippingLocations?.longitude ??
+      vendor.location?.coordinates?.[0]
+    );
+
+    const storeRadiusKm = Number(vendor.deliveryRadiusKm) || 5;
+
+    if (!isNaN(custLat) && !isNaN(custLng) && !isNaN(vendorLat) && !isNaN(vendorLng)) {
+      const distanceKm = calculateDistanceKm(custLat, custLng, vendorLat, vendorLng);
+      if (distanceKm > storeRadiusKm) {
+        return next(
+          new AppError(
+            `This store does not deliver to your selected location. The store is ${distanceKm.toFixed(1)} km away, but only delivers within ${storeRadiusKm} km. Please select a deliverable address or choose items from nearby stores.`,
+            400
+          )
+        );
+      }
+      resolvedAddress.latitude = custLat;
+      resolvedAddress.longitude = custLng;
     }
 
     // Check stock & build authoritative order item records (Server-side price truth!)

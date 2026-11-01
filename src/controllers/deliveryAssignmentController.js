@@ -46,10 +46,93 @@ export const getActiveAssignment = async (req, res, next) => {
     }
 
     if (!deliveryBoy.activeOrderId) {
+      // Check if there is an active pending delivery OFFER for this partner within timeout window
+      const activeOffer = await DeliveryAssignment.findOne({
+        deliveryBoy: deliveryBoy._id,
+        status: "OFFERED",
+        expiresAt: { $gt: new Date() },
+      })
+        .populate({
+          path: "order",
+          populate: [
+            { path: "customer", select: "name phone email" },
+            { path: "vendor", select: "businessDetails sellerDetails shippingLocations location" },
+          ],
+        })
+        .populate("vendor", "businessDetails sellerDetails shippingLocations location");
+
+      if (activeOffer && activeOffer.order) {
+        const order = activeOffer.order;
+        const vendor = activeOffer.vendor || order.vendor;
+        const remainingSeconds = Math.max(
+          1,
+          Math.round((new Date(activeOffer.expiresAt).getTime() - Date.now()) / 1000)
+        );
+
+        const lastAttempt =
+          Array.isArray(activeOffer.attempts) && activeOffer.attempts.length > 0
+            ? activeOffer.attempts[activeOffer.attempts.length - 1]
+            : null;
+
+        const distanceKm = lastAttempt?.distanceKm || 1;
+        const searchTier = lastAttempt?.searchTier || "PRIORITY_1";
+
+        const pickupCoords =
+          activeOffer.pickupLocation?.coordinates ||
+          vendor?.location?.coordinates ||
+          vendor?.shippingLocations?.coordinates ||
+          [];
+
+        const dropCoords =
+          activeOffer.deliveryLocation?.coordinates ||
+          order.deliveryAddress?.coordinates ||
+          [];
+
+        const offerPayload = {
+          assignmentId: activeOffer._id.toString(),
+          orderId: order._id.toString(),
+          orderNumber: order.orderNumber,
+          pickup: {
+            storeName: vendor?.businessDetails?.businessName || "Bhansamart Partner Store",
+            address:
+              activeOffer.pickupLocation?.address ||
+              vendor?.shippingLocations?.warehouseAddress ||
+              vendor?.sellerDetails?.address ||
+              "",
+            distanceKm,
+            coordinates: pickupCoords,
+          },
+          drop: {
+            customerName: order.customer?.name || "Customer",
+            address:
+              activeOffer.deliveryLocation?.address ||
+              order.deliveryAddress?.addressLine ||
+              "",
+            coordinates: dropCoords,
+          },
+          partnerLocation: deliveryBoy.currentLocation?.coordinates || [],
+          itemsCount: order.totalCount || (order.items?.length || 1),
+          estimatedEarnings: order.deliveryEarnings?.total || 60,
+          expiresAt: activeOffer.expiresAt,
+          timeoutSeconds: remainingSeconds,
+          tier: searchTier,
+        };
+
+        return res.status(200).json({
+          success: true,
+          hasActiveOrder: false,
+          order: null,
+          hasPendingOffer: true,
+          pendingOffer: offerPayload,
+        });
+      }
+
       return res.status(200).json({
         success: true,
         hasActiveOrder: false,
         order: null,
+        hasPendingOffer: false,
+        pendingOffer: null,
       });
     }
 
