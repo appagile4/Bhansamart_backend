@@ -1102,12 +1102,29 @@ export const createAdminAccount = async (req, res, next) => {
       adminPermissions = {},
     } = req.body;
 
-    if (!name || !email || !password) {
+    if (!name || !name.trim() || !email || !email.trim() || !password) {
       return next(new AppError("Name, email, and password are required to create an admin account", 400));
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      return next(new AppError("Please provide a valid email address", 400));
     }
 
     if (password.length < 6) {
       return next(new AppError("Password must be at least 6 characters long", 400));
+    }
+
+    if (!phone || !String(phone).trim()) {
+      return next(new AppError("Phone number is required to create a staff admin account", 400));
+    }
+
+    const cleanPhone = String(phone).trim();
+    const phoneRegex = /^[0-9]{10}$/;
+    if (!phoneRegex.test(cleanPhone)) {
+      return next(
+        new AppError("Please provide a valid 10-digit mobile phone number (digits only, e.g. 9801234567)", 400)
+      );
     }
 
     const existing = await User.findOne({ email: email.toLowerCase().trim() });
@@ -1171,7 +1188,16 @@ export const updateAdminAccount = async (req, res, next) => {
     }
 
     if (name) admin.name = name.trim();
-    if (phone !== undefined) admin.phone = phone;
+    if (phone !== undefined) {
+      const cleanPhone = String(phone).trim();
+      const phoneRegex = /^[0-9]{10}$/;
+      if (!phoneRegex.test(cleanPhone)) {
+        return next(
+          new AppError("Please provide a valid 10-digit mobile phone number (digits only, e.g. 9801234567)", 400)
+        );
+      }
+      admin.phone = cleanPhone;
+    }
     if (Array.isArray(assignedVendors)) admin.assignedVendors = assignedVendors;
     if (adminPermissions) admin.adminPermissions = { ...admin.adminPermissions, ...adminPermissions };
     if (isActive !== undefined) admin.isActive = Boolean(isActive);
