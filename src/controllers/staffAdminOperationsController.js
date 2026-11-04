@@ -1329,8 +1329,15 @@ export const examineVendorWithdrawalAdmin = async (req, res, next) => {
     } else if (escalationAction === "REQUEST_INFO") {
       txn.escalationStatus = "INFO_REQUESTED";
     } else if (escalationAction === "REJECT" && req.user.role === "superadmin") {
-      txn.status = "FAILED";
+      txn.status = "REJECTED";
+      txn.escalationStatus = "REJECTED";
       txn.rejectionReason = rejectionReason || "Rejected by finance review";
+
+      if (txn.vendor && txn.vendor.wallet) {
+        txn.vendor.wallet.currentBalance = Math.round(((txn.vendor.wallet.currentBalance || 0) + txn.amount) * 100) / 100;
+        txn.vendor.wallet.pendingSettlement = Math.max(0, (txn.vendor.wallet.pendingSettlement || 0) - txn.amount);
+        await txn.vendor.save();
+      }
     }
 
     await txn.save();

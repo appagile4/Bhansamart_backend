@@ -109,12 +109,12 @@ export const getAdminDashboardStats = async (req, res, next) => {
       financialAgg,
       openTicketsCount,
       pendingWithdrawalsCount,
+      paymentBreakdownAgg,
     ] = await Promise.all([
       Vendor.countDocuments(vendorQuery),
       Vendor.countDocuments({
         ...vendorQuery,
         $or: [{ status: { $in: ["approved", "active"] } }, { "businessDetails.verificationStatus": "approved" }],
-        isStoreOpen: true,
       }),
       Vendor.countDocuments({
         ...vendorQuery,
@@ -124,7 +124,7 @@ export const getAdminDashboardStats = async (req, res, next) => {
         ? User.countDocuments({ role: "customer" })
         : Order.distinct("customer", { vendor: { $in: accessibleVendors || [] } }).then((ids) => ids.length),
       isSuperAdmin
-        ? User.countDocuments({ role: "customer", isActive: true })
+        ? User.countDocuments({ role: "customer", isActive: { $ne: false } })
         : Order.distinct("customer", {
             vendor: { $in: accessibleVendors || [] },
             createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
@@ -174,11 +174,25 @@ export const getAdminDashboardStats = async (req, res, next) => {
               $sum: {
                 $cond: [
                   {
-                    $or: [
-                      { $in: ["$paymentStatus", ["paid", "PAID"]] },
-                      { $in: ["$orderStatus", ["DELIVERED", "delivered", "COMPLETED", "completed"]] },
+                    $and: [
+                      { $not: [{ $in: ["$orderStatus", ["CANCELLED", "REJECTED", "cancelled", "rejected"]] }] },
+                      {
+                        $or: [
+                          { $in: ["$paymentStatus", ["paid", "PAID"]] },
+                          { $in: ["$orderStatus", ["DELIVERED", "delivered", "COMPLETED", "completed"]] },
+                        ],
+                      },
                     ],
                   },
+                  "$totalAmount",
+                  0,
+                ],
+              },
+            },
+            deliveredSales: {
+              $sum: {
+                $cond: [
+                  { $in: ["$orderStatus", ["DELIVERED", "delivered", "COMPLETED", "completed"]] },
                   "$totalAmount",
                   0,
                 ],
@@ -226,13 +240,35 @@ export const getAdminDashboardStats = async (req, res, next) => {
         : Promise.resolve([]),
       // Open Support Tickets
       Ticket.countDocuments({
-        status: { $in: ["OPEN", "ASSIGNED", "IN_PROGRESS"] },
+        status: { $in: ["OPEN", "ASSIGNED", "IN_PROGRESS", "open", "assigned", "in_progress"] },
         ...(isSuperAdmin ? {} : { vendor: { $in: accessibleVendors || [] } }),
       }),
       // Pending Withdrawals
       isSuperAdmin
-        ? VendorTransaction.countDocuments({ type: "WITHDRAWAL_REQUEST", status: "PENDING" })
+        ? VendorTransaction.countDocuments({
+            type: { $in: ["WITHDRAWAL", "WITHDRAWAL_REQUEST"] },
+            status: { $in: ["PENDING", "pending"] },
+          })
         : 0,
+      // Payment Breakdown for timeframe
+      Order.aggregate([
+        { $match: orderQuery },
+        {
+          $group: {
+            _id: "$paymentMethod",
+            count: { $sum: 1 },
+            amount: {
+              $sum: {
+                $cond: [
+                  { $not: [{ $in: ["$orderStatus", ["CANCELLED", "REJECTED", "cancelled", "rejected"]] }] },
+                  "$totalAmount",
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]),
     ]);
 
     const orderStats = ordersAgg[0] || {
@@ -241,6 +277,7 @@ export const getAdminDashboardStats = async (req, res, next) => {
       cancelledOrders: 0,
       pendingOrders: 0,
       grossSales: 0,
+      deliveredSales: 0,
     };
 
     const finStats = financialAgg[0] || {
@@ -252,11 +289,29 @@ export const getAdminDashboardStats = async (req, res, next) => {
       totalWithdrawalsPaid: 0,
     };
 
-    // Calculate net superadmin commission (Gross Commission - Reversals)
-    const netSuperadminCommission = Math.max(
-      0,
-      Math.round((finStats.totalCommission - finStats.totalCommissionReversals) * 100) / 100
-    );
+    // Authoritative Financial reconciliation
+    const realizedGross = orderStats.grossSales || 0;
+    const ledgerGross = finStats.totalCapturedGross || 0;
+    const grossTransactions = Math.max(realizedGross, ledgerGross);
+
+    let netCommissionEarned = 0;
+    if (finStats.totalCommission > 0) {
+      netCommissionEarned = Math.max(
+        0,
+        Math.round((finStats.totalCommission - finStats.totalCommissionReversals) * 100) / 100
+      );
+    } else if (grossTransactions > 0) {
+      // 1.5% platform commission automatically earned from delivered orders
+      const commissionCalc = calculateCommission(grossTransactions, FINANCE_CONFIG.SUPERADMIN_COMMISSION_RATE);
+      netCommissionEarned = commissionCalc.commission;
+    }
+
+    let vendorGrossEarnings = 0;
+    if (finStats.totalVendorEarnings > 0 && finStats.totalVendorEarnings >= grossTransactions - netCommissionEarned) {
+      vendorGrossEarnings = Math.max(0, finStats.totalVendorEarnings - finStats.totalRefundDeductions);
+    } else {
+      vendorGrossEarnings = Math.max(0, Math.round((grossTransactions - netCommissionEarned - (finStats.totalRefundDeductions || 0)) * 100) / 100);
+    }
 
     // Sum current vendor wallet balances
     let totalVendorWalletBalance = 0;
@@ -301,13 +356,14 @@ export const getAdminDashboardStats = async (req, res, next) => {
             pending: orderStats.pendingOrders,
             cancelled: orderStats.cancelledOrders,
             grossSales: orderStats.grossSales,
+            deliveredSales: orderStats.deliveredSales,
           },
           finances: isSuperAdmin
             ? {
                 commissionRate: FINANCE_CONFIG.SUPERADMIN_COMMISSION_RATE,
-                grossTransactions: finStats.totalCapturedGross,
-                netCommissionEarned: netSuperadminCommission,
-                vendorGrossEarnings: finStats.totalVendorEarnings,
+                grossTransactions,
+                netCommissionEarned,
+                vendorGrossEarnings,
                 vendorWalletBalances: totalVendorWalletBalance,
                 vendorPendingSettlements: totalPendingSettlement,
                 totalRefundDeductions: finStats.totalRefundDeductions,
@@ -319,6 +375,7 @@ export const getAdminDashboardStats = async (req, res, next) => {
             open: openTicketsCount,
           },
         },
+        paymentBreakdown: paymentBreakdownAgg,
       },
     });
   } catch (error) {
@@ -350,15 +407,20 @@ export const getDashboardCharts = async (req, res, next) => {
       { $match: matchQuery },
       {
         $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "+05:45" } },
           ordersCount: { $sum: 1 },
           sales: {
             $sum: {
               $cond: [
                 {
-                  $or: [
-                    { $in: ["$paymentStatus", ["paid", "PAID"]] },
-                    { $in: ["$orderStatus", ["DELIVERED", "delivered", "COMPLETED", "completed"]] },
+                  $and: [
+                    { $not: [{ $in: ["$orderStatus", ["CANCELLED", "REJECTED", "cancelled", "rejected"]] }] },
+                    {
+                      $or: [
+                        { $in: ["$paymentStatus", ["paid", "PAID"]] },
+                        { $in: ["$orderStatus", ["DELIVERED", "delivered", "COMPLETED", "completed"]] },
+                      ],
+                    },
                   ],
                 },
                 "$totalAmount",
@@ -378,7 +440,15 @@ export const getDashboardCharts = async (req, res, next) => {
         $group: {
           _id: "$paymentMethod",
           count: { $sum: 1 },
-          amount: { $sum: "$totalAmount" },
+          amount: {
+            $sum: {
+              $cond: [
+                { $not: [{ $in: ["$orderStatus", ["CANCELLED", "REJECTED", "cancelled", "rejected"]] }] },
+                "$totalAmount",
+                0,
+              ],
+            },
+          },
         },
       },
     ]);
@@ -1889,13 +1959,24 @@ export const getAllWithdrawalsAdmin = async (req, res, next) => {
   try {
     const { status = "ALL" } = req.query;
 
-    const query = { type: "WITHDRAWAL_REQUEST" };
+    const query = {
+      type: { $in: ["WITHDRAWAL", "WITHDRAWAL_REQUEST"] },
+    };
     if (status && status !== "ALL") {
-      query.status = status;
+      if (status === "REJECTED" || status === "DECLINED") {
+        query.status = { $in: ["REJECTED", "REVERSED", "FAILED", "DECLINED"] };
+      } else if (status === "SETTLED") {
+        query.status = { $in: ["SETTLED", "COMPLETED"] };
+      } else if (status === "PENDING") {
+        query.status = { $in: ["PENDING", "SUBMITTED"] };
+      } else {
+        query.status = status;
+      }
     }
 
     const withdrawals = await VendorTransaction.find(query)
       .populate("vendor", "businessDetails.businessName sellerDetails.sellerName sellerDetails.sellerPhone bankDetails wallet")
+      .populate("reviewedBy", "name email role")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -1919,11 +2000,11 @@ export const reviewWithdrawalAdmin = async (req, res, next) => {
     }
 
     const withdrawalTxn = await VendorTransaction.findById(id);
-    if (!withdrawalTxn || withdrawalTxn.type !== "WITHDRAWAL_REQUEST") {
+    if (!withdrawalTxn || !["WITHDRAWAL", "WITHDRAWAL_REQUEST"].includes(withdrawalTxn.type)) {
       return next(new AppError("Withdrawal request not found", 404));
     }
 
-    if (withdrawalTxn.status !== "PENDING") {
+    if (!["PENDING", "SUBMITTED"].includes(withdrawalTxn.status)) {
       return next(new AppError(`Withdrawal has already been marked as ${withdrawalTxn.status}`, 400));
     }
 
@@ -1937,8 +2018,17 @@ export const reviewWithdrawalAdmin = async (req, res, next) => {
     if (action === "APPROVE") {
       // Mark request approved
       withdrawalTxn.status = "SETTLED";
-      withdrawalTxn.notes = `${withdrawalTxn.notes} | Approved by Superadmin. Reference: ${payoutReference || "Bank Transfer"}`;
+      withdrawalTxn.escalationStatus = "SETTLED";
+      withdrawalTxn.bankReference = payoutReference || withdrawalTxn.bankReference || "";
+      withdrawalTxn.reviewedBy = req.user._id;
+      withdrawalTxn.notes = `${withdrawalTxn.notes || ""} | Approved by Superadmin. Reference: ${payoutReference || "Bank Transfer"}`.trim();
       await withdrawalTxn.save();
+
+      // Deduct from pendingSettlement
+      if (vendor.wallet) {
+        vendor.wallet.pendingSettlement = Math.max(0, (vendor.wallet.pendingSettlement || 0) - amount);
+        await vendor.save();
+      }
 
       // Create permanent ledger payout transaction
       await VendorTransaction.create({
@@ -1967,14 +2057,20 @@ export const reviewWithdrawalAdmin = async (req, res, next) => {
         type: "WALLET_SETTLEMENT",
       });
     } else {
-      // REJECT: Refund available balance back to vendor's wallet!
-      withdrawalTxn.status = "REVERSED";
-      withdrawalTxn.notes = `${withdrawalTxn.notes} | Rejected by Superadmin. Reason: ${reason}`;
+      // REJECT: Set status to REJECTED, store reason, and refund available balance back to vendor's wallet
+      withdrawalTxn.status = "REJECTED";
+      withdrawalTxn.escalationStatus = "REJECTED";
+      withdrawalTxn.rejectionReason = reason;
+      withdrawalTxn.reviewedBy = req.user._id;
+      withdrawalTxn.notes = `${withdrawalTxn.notes || ""} | Rejected by Superadmin. Reason: ${reason}`.trim();
       await withdrawalTxn.save();
 
-      // Restore vendor available balance
-      vendor.wallet.currentBalance = Math.round(((vendor.wallet.currentBalance || 0) + amount) * 100) / 100;
-      await vendor.save();
+      // Restore vendor available balance and decrement pendingSettlement
+      if (vendor.wallet) {
+        vendor.wallet.currentBalance = Math.round(((vendor.wallet.currentBalance || 0) + amount) * 100) / 100;
+        vendor.wallet.pendingSettlement = Math.max(0, (vendor.wallet.pendingSettlement || 0) - amount);
+        await vendor.save();
+      }
 
       await logAdminAction({
         req,
@@ -1991,10 +2087,83 @@ export const reviewWithdrawalAdmin = async (req, res, next) => {
       });
     }
 
+    const populatedTxn = await VendorTransaction.findById(withdrawalTxn._id)
+      .populate("vendor", "businessDetails.businessName sellerDetails.sellerName sellerDetails.sellerPhone bankDetails wallet")
+      .populate("reviewedBy", "name email role")
+      .lean();
+
     res.status(200).json({
       success: true,
       message: `Withdrawal request ${action === "APPROVE" ? "approved" : "declined"} successfully.`,
-      data: withdrawalTxn,
+      data: populatedTxn || withdrawalTxn,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const createVendorWithdrawalAdmin = async (req, res, next) => {
+  try {
+    const { vendorId, amount, notes = "" } = req.body;
+
+    if (!vendorId) {
+      return next(new AppError("Vendor ID is required", 400));
+    }
+
+    const withdrawAmount = Number(amount);
+    if (!withdrawAmount || isNaN(withdrawAmount) || withdrawAmount <= 0) {
+      return next(new AppError("Please provide a valid withdrawal amount greater than 0", 400));
+    }
+
+    const vendor = await Vendor.findById(vendorId);
+    if (!vendor) {
+      return next(new AppError("Vendor not found", 404));
+    }
+
+    const currentBalance = vendor.wallet?.currentBalance || 0;
+    if (withdrawAmount > currentBalance) {
+      return next(
+        new AppError(
+          `Withdrawal amount (NPR ${withdrawAmount.toLocaleString()}) exceeds vendor available balance (NPR ${currentBalance.toLocaleString()}).`,
+          400
+        )
+      );
+    }
+
+    const idempotencyKey = `ADMIN-WITHDRAW-${vendor._id}-${Date.now()}`;
+    const transaction = await VendorTransaction.create({
+      vendor: vendor._id,
+      type: "WITHDRAWAL",
+      amount: withdrawAmount,
+      grossAmount: withdrawAmount,
+      netAmount: withdrawAmount,
+      paymentMethod: "Bank Transfer",
+      status: "PENDING",
+      idempotencyKey,
+      notes: notes || `Admin-initiated withdrawal for ${vendor.businessDetails?.businessName || vendor.sellerDetails?.sellerName || "Vendor"}`,
+    });
+
+    // Update wallet balance
+    vendor.wallet.currentBalance = Math.round((currentBalance - withdrawAmount) * 100) / 100;
+    vendor.wallet.pendingSettlement = Math.round(((vendor.wallet.pendingSettlement || 0) + withdrawAmount) * 100) / 100;
+    await vendor.save();
+
+    await logAdminAction({
+      req,
+      action: "CREATE_WITHDRAWAL",
+      targetResource: "Withdrawal",
+      targetId: transaction._id,
+      details: `Superadmin created withdrawal of NPR ${withdrawAmount} for ${vendor.businessDetails?.businessName || vendor._id}`,
+    });
+
+    const populated = await VendorTransaction.findById(transaction._id)
+      .populate("vendor", "businessDetails.businessName sellerDetails.sellerName sellerDetails.sellerPhone bankDetails wallet")
+      .lean();
+
+    res.status(201).json({
+      success: true,
+      message: `Withdrawal request for NPR ${withdrawAmount.toLocaleString()} created successfully.`,
+      data: populated || transaction,
     });
   } catch (error) {
     next(error);

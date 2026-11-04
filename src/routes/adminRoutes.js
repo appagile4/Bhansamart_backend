@@ -20,6 +20,7 @@ import {
   getAllFinancialTransactions,
   getAllWithdrawalsAdmin,
   reviewWithdrawalAdmin,
+  createVendorWithdrawalAdmin,
   getPlatformPaymentConfigAdmin,
   updatePlatformPaymentConfigAdmin,
   getActiveCheckoutPaymentMethods,
@@ -133,6 +134,7 @@ router.get("/map/live-data", getLiveOperationalMapData);
 // 10. Financial Management (Superadmin Only)
 router.get("/finance/transactions", requireSuperadminOnly, getAllFinancialTransactions);
 router.get("/finance/withdrawals", requireSuperadminOnly, getAllWithdrawalsAdmin);
+router.post("/finance/withdrawals", requireSuperadminOnly, createVendorWithdrawalAdmin);
 router.post("/finance/withdrawals/:id/review", requireSuperadminOnly, reviewWithdrawalAdmin);
 router.get("/finance/cod-reporting", requireSuperadminOnly, getDeliveryCodReconciliationAdmin);
 
