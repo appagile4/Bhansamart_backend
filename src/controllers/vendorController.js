@@ -7,6 +7,7 @@ import {
   emitVendorAvailabilityChanged,
 } from "../socket/socketManager.js";
 import { calculateDistanceKm } from "../utils/dispatchEngine.js";
+import { releaseByUrls } from "../utils/storageQuota.js";
 
 /**
  * @desc    Get current authenticated vendor data
@@ -154,9 +155,13 @@ export const uploadVendorLogo = async (req, res) => {
       500
     );
 
+    const previousLogoUrl = vendor.brandDetails?.brandLogo;
     vendor.brandDetails.brandLogo = uploadResult.secure_url;
     vendor.brandDetails.brandLogoPublicId = uploadResult.public_id;
     await vendor.save();
+
+    // Vendor storage: free the replaced logo (background)
+    if (previousLogoUrl && previousLogoUrl !== uploadResult.secure_url) releaseByUrls(vendor._id, [previousLogoUrl]).catch(() => {});
 
     return res.status(200).json({
       success: true,

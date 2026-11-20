@@ -668,8 +668,8 @@ export const superAdminProcessOnlineRefund = async (req, res, next) => {
  */
 export const adminAssignReturnPickup = async (req, res, next) => {
   try {
-    if (req.user.role !== "superadmin") {
-      return next(new AppError("Only Super Admin can assign delivery partners for return pickups.", 403));
+    if (req.user.role !== "superadmin" && req.user.role !== "admin") {
+      return next(new AppError("Only Super Admin or Admin can assign delivery partners for return pickups.", 403));
     }
 
     const { id } = req.params;

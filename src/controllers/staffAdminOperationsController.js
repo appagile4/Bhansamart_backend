@@ -15,6 +15,7 @@ import Ticket from "../models/Ticket.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import { notifyStaffAdminsForVendor } from "../socket/socketManager.js";
 import { processOrderRefund } from "../services/financeLedgerService.js";
+import { generateNumericOTP } from "../utils/generateOTP.js";
 
 /**
  * Helper: Resolve StaffAdmin's accessible vendor IDs.
@@ -202,9 +203,10 @@ export const getStaffDashboardOverview = async (req, res, next) => {
         status: { $in: ["approved", "active"] },
         isStoreOpen: true,
       }),
-      Product.countDocuments(scopedProductQuery),
-      Product.countDocuments({ ...scopedProductQuery, status: "active", isActive: true }),
-      Product.countDocuments({ ...scopedProductQuery, stock: { $lte: 0 } }),
+      // Product.status enum is "Active" (capital A); soft-deleted products are excluded
+      Product.countDocuments({ ...scopedProductQuery, isDeleted: { $ne: true } }),
+      Product.countDocuments({ ...scopedProductQuery, isDeleted: { $ne: true }, status: "Active", isActive: { $ne: false } }),
+      Product.countDocuments({ ...scopedProductQuery, isDeleted: { $ne: true }, stock: { $lte: 0 } }),
 
       // Orders Aggregation in timeframe
       Order.aggregate([
@@ -1614,18 +1616,17 @@ export const staffExamineRefundAction = async (req, res, next) => {
     }
 
     const { id } = req.params;
-    const {
-      notes = "",
-      action = "FORWARD_TO_FINANCE", // FORWARD_TO_FINANCE | SCHEDULE_PICKUP | REJECT
-      rejectionReason = "",
-    } = req.body;
+    const bodyAction = req.body.action || (req.body.decision === "REQUIRE_RETURN_PICKUP" ? "SCHEDULE_PICKUP" : req.body.decision === "REJECTED" ? "REJECT" : req.body.decision) || "FORWARD_TO_FINANCE";
+    const notes = req.body.notes || req.body.examinationNotes || "";
+    const rejectionReason = req.body.rejectionReason || (bodyAction === "REJECT" ? notes : "");
+    const action = bodyAction;
 
     const refund = await Refund.findById(id).populate("vendor order");
     if (!refund) {
       return next(new AppError("Return / Refund claim not found", 404));
     }
 
-    assertVendorAccessible(req, refund.vendor._id);
+    assertVendorAccessible(req, refund.vendor?._id || refund.vendor);
 
     // Rule: StaffAdmin cannot transfer money directly. They examine operational validity.
     refund.staffReview = {
@@ -1660,13 +1661,15 @@ export const staffExamineRefundAction = async (req, res, next) => {
     await refund.save();
 
     // Alert Superadmin & Vendor
-    await notifyStaffAdminsForVendor({
-      vendorId: refund.vendor._id,
-      eventType: "staff_refund:updated",
-      title: "Claim Examined by StaffAdmin",
-      message: `Return claim ${refund.refundNumber} examined: ${refund.status}`,
-      data: { refundId: refund._id, status: refund.status },
-    });
+    if (refund.vendor) {
+      await notifyStaffAdminsForVendor({
+        vendorId: refund.vendor?._id || refund.vendor,
+        eventType: "staff_refund:updated",
+        title: "Claim Examined by StaffAdmin",
+        message: `Return claim ${refund.refundNumber} examined: ${refund.status}`,
+        data: { refundId: refund._id, status: refund.status },
+      }).catch(() => {});
+    }
 
     res.status(200).json({
       success: true,
@@ -1690,20 +1693,34 @@ export const updateRefundPickupAction = async (req, res, next) => {
     }
 
     const { id } = req.params;
-    const { deliveryBoyId, pickupStatus, notes = "" } = req.body;
+    const { deliveryBoyId, pickupStatus, notes = "", trackingNumber = "" } = req.body;
 
     const refund = await Refund.findById(id).populate("vendor");
     if (!refund) {
       return next(new AppError("Claim not found", 404));
     }
 
-    assertVendorAccessible(req, refund.vendor._id);
+    assertVendorAccessible(req, refund.vendor?._id || refund.vendor);
 
+    let generatedOtp = "";
     if (deliveryBoyId) {
-      refund.pickup.deliveryBoy = deliveryBoyId;
+      const deliveryBoy = await DeliveryBoy.findById(deliveryBoyId);
+      if (!deliveryBoy) {
+        return next(new AppError("Delivery partner not found", 404));
+      }
+      refund.pickup.required = true;
+      refund.pickup.deliveryBoy = deliveryBoy._id;
+      if (!refund.pickup.otp) {
+        refund.pickup.otp = generateNumericOTP(4);
+        refund.pickup.otpExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+      }
+      generatedOtp = refund.pickup.otp;
+      refund.pickup.isOtpVerified = false;
       refund.pickup.status = "ASSIGNED";
       refund.pickup.scheduledAt = new Date();
+      refund.status = "RETURN_PICKUP_SCHEDULED";
     }
+
     if (pickupStatus) {
       refund.pickup.status = pickupStatus;
       if (pickupStatus === "PICKED_UP") {
@@ -1716,13 +1733,14 @@ export const updateRefundPickupAction = async (req, res, next) => {
         refund.inspection.result = "PENDING";
       }
     }
-    if (notes) refund.pickup.notes = notes;
+    const fullNotes = [notes.trim(), trackingNumber ? `Tracking: ${trackingNumber}` : ""].filter(Boolean).join(" · ");
+    if (fullNotes) refund.pickup.notes = fullNotes;
 
     refund.timeline.push({
       status: refund.status,
       actorRole: req.user.role,
       actorName: req.user.name,
-      notes: `Reverse pickup update: ${refund.pickup.status}`,
+      notes: `Reverse pickup update: ${refund.pickup.status}${fullNotes ? ` (${fullNotes})` : ""}`,
       timestamp: new Date(),
     });
 
@@ -1730,8 +1748,11 @@ export const updateRefundPickupAction = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      message: "Pickup state updated.",
+      message: deliveryBoyId
+        ? `Return pickup assigned successfully.${generatedOtp ? ` Customer verification OTP: ${generatedOtp}` : ""}`
+        : `Pickup state updated to ${refund.pickup.status}.`,
       refund,
+      pickupOtp: generatedOtp || refund.pickup.otp,
     });
   } catch (error) {
     next(error);
@@ -1750,14 +1771,21 @@ export const recordRefundInspectionAction = async (req, res, next) => {
     }
 
     const { id } = req.params;
-    const { result, notes = "", proofImages = [] } = req.body;
+    const { proofImages = [] } = req.body;
+    let result = req.body.result;
+    if (!result) {
+      if (req.body.passed === true) result = "PASSED";
+      else if (req.body.passed === false) result = "FAILED";
+      else result = "PASSED";
+    }
+    const notes = req.body.notes || req.body.inspectionNotes || "";
 
     const refund = await Refund.findById(id).populate("vendor");
     if (!refund) {
       return next(new AppError("Claim not found", 404));
     }
 
-    assertVendorAccessible(req, refund.vendor._id);
+    assertVendorAccessible(req, refund.vendor?._id || refund.vendor);
 
     refund.inspection.result = result; // PASSED | FAILED
     refund.inspection.notes = notes;
@@ -1806,17 +1834,48 @@ export const finalizeRefundPayoutAction = async (req, res, next) => {
     }
 
     const { id } = req.params;
+    const { notes = "", payoutReference = "", action = "approve" } = req.body || {};
     const refund = await Refund.findById(id).populate("order vendor");
     if (!refund) {
       return next(new AppError("Claim not found", 404));
+    }
+
+    if (action === "reject") {
+      refund.status = "REJECTED";
+      refund.rejectionReason = notes || "Rejected by Super Admin during payout review";
+      refund.reviewedBy = req.user._id;
+      refund.reviewedAt = new Date();
+      refund.timeline.push({
+        status: "REJECTED",
+        actorRole: "superadmin",
+        actorName: req.user.name,
+        notes: notes || "Payout rejected by Super Admin.",
+        timestamp: new Date(),
+      });
+      await refund.save();
+      return res.status(200).json({
+        success: true,
+        message: "Refund rejected successfully.",
+        refund,
+      });
     }
 
     if (refund.status === "COMPLETED") {
       return next(new AppError("Refund has already been completed.", 400));
     }
 
+    const cleanRef = (payoutReference || "").trim() || `PAYOUT-${Date.now()}`;
+    const mergedPayoutDetails = {
+      ...(refund.customerPayoutDetails || {}),
+      payoutReference: cleanRef,
+      payoutCompletedAt: new Date(),
+      processedBy: req.user._id,
+      processedByRole: "superadmin",
+    };
+
     // Execute ledger and wallet refund
     const refundResult = await processOrderRefund({
+      refundId: refund._id,
       order: refund.order,
       items: refund.items,
       refundAmount: refund.amount,
@@ -1824,19 +1883,20 @@ export const finalizeRefundPayoutAction = async (req, res, next) => {
       description: refund.description,
       proofImages: refund.proofImages,
       claimType: refund.claimType,
-      customerPayoutDetails: refund.customerPayoutDetails,
+      customerPayoutDetails: mergedPayoutDetails,
       reviewedBy: req.user._id,
-      idempotencyKey: `PAYOUT-${refund._id}-${Date.now()}`,
+      idempotencyKey: `PAYOUT-${refund._id}-${cleanRef}`,
     });
 
     refund.status = "COMPLETED";
     refund.reviewedBy = req.user._id;
     refund.reviewedAt = new Date();
+    refund.customerPayoutDetails = mergedPayoutDetails;
     refund.timeline.push({
       status: "COMPLETED",
       actorRole: "superadmin",
       actorName: req.user.name,
-      notes: "Financial payout executed successfully.",
+      notes: notes || `Financial payout executed successfully. Ref: ${cleanRef}`,
       timestamp: new Date(),
     });
 
@@ -1846,6 +1906,7 @@ export const finalizeRefundPayoutAction = async (req, res, next) => {
       success: true,
       message: "Refund payout executed and recorded in financial ledger.",
       data: refundResult,
+      refund,
     });
   } catch (error) {
     next(error);

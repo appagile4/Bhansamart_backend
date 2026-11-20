@@ -12,6 +12,7 @@ import {
 } from "../socket/socketManager.js";
 import { uploadToCloudinary, deleteFromCloudinary } from "../utils/cloudinaryUpload.js";
 import { recordCodCashSubmission } from "../services/financeLedgerService.js";
+import { releaseByUrls } from "../utils/storageQuota.js";
 
 /**
  * Helper to resolve authenticated vendor profile
@@ -627,9 +628,13 @@ export const updatePaymentQrSettings = async (req, res, next) => {
     if (upiId !== undefined) vendor.paymentSettings.upiId = upiId.trim();
     if (accountName !== undefined) vendor.paymentSettings.accountName = accountName.trim();
     if (acceptQrPayments !== undefined) vendor.paymentSettings.acceptQrPayments = Boolean(acceptQrPayments);
+    const previousQrUrl = vendor.paymentSettings.qrCodeUrl;
     if (qrCodeUrl !== undefined) vendor.paymentSettings.qrCodeUrl = qrCodeUrl;
 
     await vendor.save();
+
+    // Vendor storage: QR removed or swapped via settings → free the old one (background)
+    if (qrCodeUrl !== undefined && previousQrUrl && previousQrUrl !== qrCodeUrl) releaseByUrls(vendor._id, [previousQrUrl]).catch(() => {});
 
     res.status(200).json({
       success: true,
@@ -669,10 +674,14 @@ export const uploadPaymentQrImage = async (req, res, next) => {
       vendor.paymentSettings = {};
     }
 
+    const previousQrUrl = vendor.paymentSettings.qrCodeUrl;
     vendor.paymentSettings.qrCodeUrl = uploadResult.secure_url;
     vendor.paymentSettings.qrCodePublicId = uploadResult.public_id;
     vendor.paymentSettings.acceptQrPayments = true;
     await vendor.save();
+
+    // Vendor storage: free the replaced QR image (background)
+    if (previousQrUrl && previousQrUrl !== uploadResult.secure_url) releaseByUrls(vendor._id, [previousQrUrl]).catch(() => {});
 
     res.status(200).json({
       success: true,

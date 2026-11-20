@@ -69,6 +69,7 @@ import {
   requireSuperadminOnly,
 } from "../middleware/adminVendorScopeMiddleware.js";
 import { uploadSingleImage } from "../middleware/uploadMiddleware.js";
+import { adminStorageRouter } from "./storageRoutes.js";
 
 const router = express.Router();
 
@@ -79,6 +80,9 @@ router.get("/checkout/payment-methods", getActiveCheckoutPaymentMethods);
 router.use(protect);
 router.use(authorizeRoles("admin", "superadmin"));
 router.use(enforceAdminVendorScope);
+
+// Vendor image storage overview, quotas & recharge verification (Superadmin Only)
+router.use("/storage", requireSuperadminOnly, adminStorageRouter);
 
 // 1. Dashboard Overview & Real-Time Stats
 router.get("/dashboard/stats", getAdminDashboardStats);

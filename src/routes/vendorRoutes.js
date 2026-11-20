@@ -29,6 +29,8 @@ import {
 import { createAttribute } from "../controllers/attributeController.js";
 import { protect, authorizeRoles } from "../middleware/authMiddleware.js";
 import { uploadSingleImage } from "../middleware/uploadMiddleware.js";
+import { storageContext } from "../middleware/storageContext.js";
+import { vendorStorageRouter } from "./storageRoutes.js";
 
 const router = Router();
 
@@ -42,7 +44,7 @@ router.use(protect, authorizeRoles("vendor", "admin"));
 // Profile & Settings
 router.get("/profile", getMyVendor);
 router.put("/update-section", updateVendorSection);
-router.post("/upload-logo", uploadSingleImage("logo"), uploadVendorLogo);
+router.post("/upload-logo", uploadSingleImage("logo"), storageContext("logo"), uploadVendorLogo);
 router.put("/delivery-radius", updateDeliveryRadius);
 router.put("/store-status", updateStoreStatus);
 
@@ -68,15 +70,19 @@ router.post("/cod/confirm-handover", confirmCodHandover);
 // Payment QR Code & UPI Config
 router.get("/payment-qr", getPaymentQrSettings);
 router.put("/payment-qr", updatePaymentQrSettings);
-router.post("/payment-qr/upload", uploadSingleImage("qrCode"), uploadPaymentQrImage);
+router.post("/payment-qr/upload", uploadSingleImage("qrCode"), storageContext("qr"), uploadPaymentQrImage);
 
 // Vendor Brand Requests & Submissions
 router.get("/brand-requests", getMyBrandRequests);
 router.post(
   "/brand-requests",
   uploadSingleImage("logo"),
+  storageContext("brand"),
   createBrandRequest
 );
+
+// Vendor image storage (usage, plans, mock recharge requests)
+router.use("/storage", vendorStorageRouter);
 
 // Vendor Attributes Management
 router.post("/attributes", createAttribute);

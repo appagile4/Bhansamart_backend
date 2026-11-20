@@ -14,6 +14,7 @@ import {
 import { protect } from "../middleware/authMiddleware.js";
 import { upload } from "../middleware/uploadMiddleware.js";
 import reviewRoutes from "./reviewRoutes.js";
+import { storageContext } from "../middleware/storageContext.js";
 
 const router = Router();
 
@@ -35,13 +36,13 @@ router.get("/my-products", protect, getVendorProducts);
 router.get("/vendor", protect, getVendorProducts);
 
 // 2. Create Product (with Cloudinary image uploads)
-router.post("/", protect, upload.array("images", 10), createProduct);
+router.post("/", protect, upload.array("images", 10), storageContext("product"), createProduct);
 
 // 3. Single Product by ID or Slug
 router.get("/:id", getProductById);
 
 // 4. Update Product
-router.put("/:id", protect, upload.array("images", 10), updateProduct);
+router.put("/:id", protect, upload.array("images", 10), storageContext("product"), updateProduct);
 
 // 5. Toggle Product Stock status
 router.patch("/:id/toggle-stock", protect, toggleProductStock);

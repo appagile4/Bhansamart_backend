@@ -1,4 +1,6 @@
 import cloudinary from "../config/cloudinary.js";
+import { compressForUpload, presetForFolder } from "./imageCompressor.js";
+import { getStorageContext, assertCanUpload, estimateUploadBytes, trackUpload } from "./storageQuota.js";
 
 /**
  * Sanitize folder and slug path to be Cloudinary-safe (only a-z, 0-9, _, -)
@@ -23,8 +25,13 @@ const sanitizePath = (pathStr) => {
  * @param {string} folder - Destination folder on Cloudinary
  * @returns {Promise<Object>} Cloudinary upload result
  */
-export const uploadToCloudinary = (fileSource, folder = "bhansamart/avatars") => {
-  return new Promise((resolve, reject) => {
+export const uploadToCloudinary = async (fileSource, folder = "bhansamart/avatars") => {
+  // Compress before upload (falls back to the original on any problem)
+  fileSource = await compressForUpload(fileSource, presetForFolder(folder));
+  // Vendor storage quota (only when the request was tagged by middleware/storageContext.js)
+  const storageCtx = getStorageContext();
+  if (storageCtx) await assertCanUpload(storageCtx.vendorId, estimateUploadBytes(fileSource));
+  const result = await new Promise((resolve, reject) => {
     const safeFolder = sanitizePath(folder) || "bhansamart/avatars";
 
     // If base64 string or URI
@@ -65,6 +72,8 @@ export const uploadToCloudinary = (fileSource, folder = "bhansamart/avatars") =>
 
     uploadStream.end(fileSource);
   });
+  if (storageCtx) await trackUpload(storageCtx, { key: result.public_id, url: result.secure_url || result.url, bytes: result.bytes });
+  return result;
 };
 
 /**
@@ -73,11 +82,16 @@ export const uploadToCloudinary = (fileSource, folder = "bhansamart/avatars") =>
  * @param {string} vendorSlug 
  * @returns {Promise<{url: string, publicId: string}>}
  */
-export const uploadProductImageToCloudinary = (
+export const uploadProductImageToCloudinary = async (
   fileSource,
   vendorSlug = "general"
 ) => {
-  return new Promise((resolve, reject) => {
+  // Compress before upload (falls back to the original on any problem)
+  fileSource = await compressForUpload(fileSource, "product");
+  // Vendor storage quota (only when the request was tagged by middleware/storageContext.js)
+  const storageCtx = getStorageContext();
+  if (storageCtx) await assertCanUpload(storageCtx.vendorId, estimateUploadBytes(fileSource));
+  const uploaded = await new Promise((resolve, reject) => {
     const safeVendorSlug = sanitizePath(vendorSlug) || "general";
     const folder = `bhansamart/vendors/${safeVendorSlug}/products`;
     const options = {
@@ -95,6 +109,7 @@ export const uploadProductImageToCloudinary = (
         resolve({
           url: result.secure_url || result.url,
           publicId: result.public_id,
+          bytes: result.bytes,
         });
       });
       return;
@@ -107,12 +122,15 @@ export const uploadProductImageToCloudinary = (
         resolve({
           url: result.secure_url || result.url,
           publicId: result.public_id,
+          bytes: result.bytes,
         });
       }
     );
 
     uploadStream.end(fileSource);
   });
+  if (storageCtx) await trackUpload(storageCtx, { key: uploaded.publicId, url: uploaded.url, bytes: uploaded.bytes });
+  return uploaded;
 };
 
 /**
@@ -120,7 +138,9 @@ export const uploadProductImageToCloudinary = (
  * @param {Buffer|string} fileSource 
  * @returns {Promise<{url: string, publicId: string}>}
  */
-export const uploadCategoryImageToCloudinary = (fileSource) => {
+export const uploadCategoryImageToCloudinary = async (fileSource) => {
+  // Compress before upload (falls back to the original on any problem)
+  fileSource = await compressForUpload(fileSource, "category");
   return new Promise((resolve, reject) => {
     const folder = "bhansamart/categories";
     const options = {

@@ -1916,7 +1916,11 @@ export const getAllFinancialTransactions = async (req, res, next) => {
 
     const query = {};
     if (vendorId) query.vendor = vendorId;
-    if (type && type !== "ALL") query.type = type;
+    if (type && type !== "ALL") {
+      // Accepts one type or a comma-separated list (ledger tabs group several types)
+      const types = String(type).split(",").map((t) => t.trim()).filter(Boolean);
+      query.type = types.length > 1 ? { $in: types } : types[0];
+    }
 
     if (search) {
       query.$or = [
@@ -2506,6 +2510,7 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
 
     const io = getIO();
     let recipientCount = 0;
+    let recipientDisplayName = "";
     const normAudience = (targetAudience || "").toUpperCase();
 
     const notifData = {
@@ -2535,7 +2540,7 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
     // ─────────────────────────────────────────────────────────────
     // CASE 1: EVERYONE / ALL APP USERS ("ALL")
     // ─────────────────────────────────────────────────────────────
-    if (normAudience === "ALL" || normAudience === "ALL_USERS") {
+    if (normAudience === "ALL" || normAudience === "ALL_USERS" || normAudience === "EVERYONE" || normAudience === "ALL_USER") {
       const [customers, vendors, riders, staff] = await Promise.all([
         User.find({ role: { $in: ["customer", "user"] }, isActive: { $ne: false } }).select("_id").lean(),
         Vendor.find({ $or: [{ status: { $in: ["approved", "active"] } }, { "businessDetails.verificationStatus": "approved" }] }).select("_id").lean(),
@@ -2610,7 +2615,7 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
     // ─────────────────────────────────────────────────────────────
     // CASE 2: CUSTOMERS ONLY ("CUSTOMERS" / "ALL_CUSTOMERS")
     // ─────────────────────────────────────────────────────────────
-    else if (normAudience === "CUSTOMERS" || normAudience === "ALL_CUSTOMERS") {
+    else if (normAudience === "CUSTOMERS" || normAudience === "ALL_CUSTOMERS" || normAudience === "CUSTOMER" || normAudience === "USERS" || normAudience === "USER") {
       const customers = await User.find({ role: { $in: ["customer", "user"] }, isActive: { $ne: false } }).select("_id").lean();
       recipientCount = customers.length;
 
@@ -2628,10 +2633,20 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
       sendPushToUsers({ userIds: customers.map((c) => c._id), title, body, data: notifData, channelId: "broadcasts" }).catch(() => {});
     }
     // ─────────────────────────────────────────────────────────────
-    // CASE 3: VENDORS ONLY ("VENDORS" / "ALL_VENDORS")
+    // CASE 3: VENDORS ONLY ("VENDORS" / "ALL_VENDORS" / "ASSIGNED_VENDORS")
     // ─────────────────────────────────────────────────────────────
-    else if (normAudience === "VENDORS" || normAudience === "ALL_VENDORS") {
-      const vendors = await Vendor.find().select("_id").lean();
+    else if (
+      normAudience === "VENDORS" ||
+      normAudience === "ALL_VENDORS" ||
+      normAudience === "ASSIGNED_VENDORS" ||
+      normAudience === "VENDOR"
+    ) {
+      const vendorQuery = {};
+      if (normAudience === "ASSIGNED_VENDORS" && !isSuperAdmin) {
+        const assignedIds = (req.user.assignedVendors || []).map((id) => id.toString());
+        vendorQuery._id = { $in: assignedIds };
+      }
+      const vendors = await Vendor.find(vendorQuery).select("_id").lean();
       recipientCount = vendors.length;
 
       const vendorDocs = vendors.map((v) => ({
@@ -2663,7 +2678,11 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
     else if (
       normAudience === "DELIVERY_BOYS" ||
       normAudience === "ALL_DELIVERY" ||
-      normAudience === "ALL_DELIVERY_BOYS"
+      normAudience === "ALL_DELIVERY_BOYS" ||
+      normAudience === "DELIVERY_BOY" ||
+      normAudience === "DELIVERY" ||
+      normAudience === "RIDERS" ||
+      normAudience === "RIDER"
     ) {
       const riders = await DeliveryBoy.find().select("user _id").lean();
       const riderUserIds = new Set();
@@ -2699,7 +2718,15 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
     // ─────────────────────────────────────────────────────────────
     // CASE 5: ADMIN STAFF ONLY ("ADMIN_STAFF" / "ALL_ADMINS")
     // ─────────────────────────────────────────────────────────────
-    else if (normAudience === "ADMIN_STAFF" || normAudience === "ALL_ADMIN_STAFF" || normAudience === "ALL_ADMINS") {
+    else if (
+      normAudience === "ADMIN_STAFF" ||
+      normAudience === "ALL_ADMIN_STAFF" ||
+      normAudience === "ALL_ADMINS" ||
+      normAudience === "STAFF_ADMIN" ||
+      normAudience === "STAFF_ADMINS" ||
+      normAudience === "ADMIN" ||
+      normAudience === "STAFF"
+    ) {
       const staff = await User.find({ role: "admin", isActive: { $ne: false } }).select("_id").lean();
       recipientCount = staff.length;
 
@@ -2726,10 +2753,10 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
     // ─────────────────────────────────────────────────────────────
     // CASE 6: SPECIFIC TARGET ("SPECIFIC" or legacy specific_*)
     // ─────────────────────────────────────────────────────────────
-    let recipientDisplayName = "";
-    if (
+    else if (
       normAudience === "SPECIFIC" ||
       normAudience === "SPECIFIC_USER" ||
+      normAudience === "SPECIFIC_VENDORS" ||
       targetAudience === "specific_customer" ||
       targetAudience === "specific_vendor" ||
       targetAudience === "specific_delivery" ||

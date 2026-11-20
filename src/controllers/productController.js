@@ -15,6 +15,7 @@ import {
   setCache,
   invalidateCachePattern,
 } from "../config/redis.js";
+import { releaseByUrls } from "../utils/storageQuota.js";
 
 /**
  * Helper to resolve Vendor for logged-in user
@@ -746,10 +747,18 @@ export const updateProduct = async (req, res, next) => {
       }
     }
 
+    const previousImageUrls = (product.images || []).map((img) => img?.url).filter(Boolean);
     const updatedProduct = await Product.findByIdAndUpdate(id, updates, {
       returnDocument: "after",
       runValidators: true,
     });
+
+    // Vendor storage: free photos that were removed in this update (background, never blocks the response)
+    if (updatedProduct && Array.isArray(updates.images)) {
+      const keptUrls = new Set(updates.images.map((img) => img?.url).filter(Boolean));
+      const removedUrls = previousImageUrls.filter((u) => !keptUrls.has(u));
+      if (removedUrls.length) releaseByUrls(vendor._id, removedUrls).catch(() => {});
+    }
 
     // Invalidate product cache in Redis asynchronously
     invalidateCachePattern("products:*").catch(() => {});
@@ -839,6 +848,9 @@ export const deleteProduct = async (req, res, next) => {
     product.isDeleted = true;
     product.status = "archived";
     await product.save();
+
+    // Vendor storage: free this product's tracked photos (files kept if orders etc. still use them)
+    releaseByUrls(vendor._id, (product.images || []).map((img) => img?.url)).catch(() => {});
 
     // Invalidate product cache in Redis asynchronously
     invalidateCachePattern("products:*").catch(() => {});
