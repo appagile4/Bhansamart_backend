@@ -167,6 +167,15 @@ const userSchema = new mongoose.Schema(
       select: false,
     },
 
+    // Google Sign-In: Google account "sub" id, set on first Google login (new or linked account).
+    // select:false keeps it out of every existing API response.
+    googleId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      select: false,
+    },
+
     // Security & state fields
     passwordChangedAt: {
       type: Date,

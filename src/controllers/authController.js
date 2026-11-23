@@ -550,25 +550,62 @@ export const logout = async (req, res) => {
  */
 export const updateProfile = async (req, res, next) => {
   try {
-    const { name, gender, dateOfBirth, address } = req.body;
+    const { name, gender, dateOfBirth, dob, address } = req.body;
 
     const user = await User.findById(req.user._id);
     if (!user) {
       return next(new AppError("User not found", 404));
     }
 
-    if (name) user.name = name.trim();
-    if (gender) user.gender = gender;
-    if (dateOfBirth) user.dateOfBirth = new Date(dateOfBirth);
+    // [CEP-03] Full Name Validation: Alphabetic characters, spaces, hyphens & apostrophes only (2-50 chars)
+    if (name !== undefined) {
+      const trimmedName = name.trim();
+      const nameRegex = /^[a-zA-Z\s'-]{2,50}$/;
+      if (!nameRegex.test(trimmedName)) {
+        return next(
+          new AppError(
+            "Full name must contain only letters, spaces, hyphens or apostrophes (minimum 2 characters, numbers and special symbols not allowed).",
+            400
+          )
+        );
+      }
+      user.name = trimmedName;
+    }
+
+    // [CEP-04] Gender Normalization & Validation
+    if (gender !== undefined && gender !== null) {
+      const rawGender = String(gender).trim().toLowerCase();
+      let normalizedGender = "Prefer not to say";
+      if (rawGender === "male") normalizedGender = "Male";
+      else if (rawGender === "female") normalizedGender = "Female";
+      else if (rawGender === "other") normalizedGender = "Other";
+      else if (rawGender === "prefer not to say" || rawGender === "prefer_not_to_say") normalizedGender = "Prefer not to say";
+      else if (rawGender === "") normalizedGender = "";
+      user.gender = normalizedGender;
+    }
+
+    // [CEP-04] Date of Birth Persistence (accepts both dateOfBirth and dob)
+    const dobInput = dateOfBirth || dob;
+    if (dobInput) {
+      const parsedDate = new Date(dobInput);
+      if (!isNaN(parsedDate.getTime())) {
+        user.dateOfBirth = parsedDate;
+      }
+    }
+
     if (address !== undefined) user.address = address.trim();
 
     await user.save({ validateBeforeSave: false });
+
+    // Ensure response includes both dateOfBirth and dob for backward/mobile compatibility
+    const userObj = user.toObject ? user.toObject() : { ...user._doc };
+    userObj.dob = user.dateOfBirth;
 
     res.status(200).json({
       success: true,
       message: "Profile updated successfully.",
       data: {
-        user,
+        user: userObj,
       },
     });
   } catch (error) {
@@ -652,6 +689,216 @@ export const removeAvatar = async (req, res, next) => {
       data: {
         user,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ==========================================
+// Google Sign-In (additive; existing auth endpoints are untouched)
+// ==========================================
+
+let googleClient = null;
+const getGoogleClient = async () => {
+  if (!googleClient) {
+    const { OAuth2Client } = await import("google-auth-library");
+    googleClient = new OAuth2Client();
+  }
+  return googleClient;
+};
+
+/** Client IDs whose ID tokens we accept (website now; mobile app IDs can be appended, comma-separated). */
+const getGoogleClientIds = () =>
+  (process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+
+/**
+ * @desc    Sign in / sign up with a Google ID token (from Google Identity Services)
+ * @route   POST /api/auth/google
+ * @body    { idToken: string, referralCode?: string }
+ * @access  Public
+ * @returns Same shape as /login and /register: { success, message, data: { user, token } }
+ */
+export const googleAuth = async (req, res, next) => {
+  try {
+    const { idToken, referralCode } = req.body || {};
+    if (!idToken || typeof idToken !== "string") {
+      return next(new AppError("Google ID token is required.", 400));
+    }
+
+    const audience = getGoogleClientIds();
+    if (audience.length === 0) {
+      return next(new AppError("Google Sign-In is not configured on the server.", 503));
+    }
+
+    // 1. Verify the ID token with Google (signature, expiry, issuer, audience)
+    let payload;
+    try {
+      const client = await getGoogleClient();
+      const ticket = await client.verifyIdToken({ idToken, audience });
+      payload = ticket.getPayload();
+    } catch {
+      return next(new AppError("Invalid or expired Google sign-in. Please try again.", 401));
+    }
+
+    if (!payload?.sub || !payload.email || payload.email_verified !== true) {
+      return next(new AppError("Your Google account email is not verified.", 401));
+    }
+
+    const googleId = payload.sub;
+    const email = payload.email.toLowerCase();
+    const name = (payload.name || email.split("@")[0]).slice(0, 100);
+
+    // 2. Find the account: by Google id first, then by email (to link an existing account)
+    let user =
+      (await User.findOne({ googleId }).select("+googleId")) ||
+      (await User.findOne({ email }).select("+googleId"));
+
+    let isNewUser = false;
+
+    if (user) {
+      // Same rules as /login
+      if (user.role === "vendor") {
+        return next(
+          new AppError(
+            "This account is registered as a Vendor. Please log in through the Vendor Portal.",
+            403
+          )
+        );
+      }
+      if (!user.isActive) {
+        return next(
+          new AppError("Your account has been deactivated. Please contact support.", 403)
+        );
+      }
+
+      // Link Google to the existing account (email ownership proven by Google) and stamp login.
+      // updateOne avoids re-validating/re-saving any other field of the existing document.
+      const update = { lastLoginAt: new Date() };
+      if (!user.googleId) update.googleId = googleId;
+      if (!user.avatar && payload.picture) update.avatar = payload.picture;
+      await User.updateOne({ _id: user._id }, { $set: update });
+      Object.assign(user, update);
+    } else {
+      // 3. New customer: mirror /register (referral handling, verified email)
+      let validatedReferrer = null;
+      if (referralCode && typeof referralCode === "string" && referralCode.trim() !== "") {
+        try {
+          validatedReferrer = await validateReferralCode(referralCode);
+        } catch (refErr) {
+          return next(new AppError(refErr.message || "Invalid referral code.", 400));
+        }
+      }
+
+      const newUserReferralCode = await generateUniqueReferralCode(name);
+      const { randomBytes } = await import("crypto");
+
+      user = await User.create({
+        name,
+        email,
+        // Unusable random password: satisfies the schema; the user can set a real one via
+        // "Forgot password" if they ever want email/password login too.
+        password: randomBytes(32).toString("hex"),
+        avatar: payload.picture || "",
+        googleId,
+        role: "customer",
+        referralCode: newUserReferralCode,
+        referredBy: validatedReferrer ? validatedReferrer.referrerId : null,
+        isEmailVerified: true,
+        lastLoginAt: new Date(),
+      });
+      isNewUser = true;
+
+      if (validatedReferrer) {
+        try {
+          const referral = await createReferralAttribution({
+            referrerId: validatedReferrer.referrerId,
+            referredId: user._id,
+            referralCode,
+          });
+          if (referral && user.isEmailVerified) {
+            await processReferralReward({ referralId: referral._id });
+            const updatedUser = await User.findById(user._id).select("rewardPoints");
+            if (updatedUser) user.rewardPoints = updatedUser.rewardPoints;
+          }
+        } catch (rewardErr) {
+          console.error("[Referral Reward Processing Error]:", rewardErr);
+        }
+      }
+    }
+
+    // 4. Issue the normal BhansaMart JWT (same as /login)
+    const token = generateAccessToken(user);
+
+    const userResponse = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      address: user.address,
+      dateOfBirth: user.dateOfBirth,
+      gender: user.gender,
+      role: user.role,
+      avatar: user.avatar,
+      referralCode: user.referralCode,
+      rewardPoints: user.rewardPoints || 0,
+      isEmailVerified: user.isEmailVerified,
+    };
+
+    res.status(isNewUser ? 201 : 200).json({
+      success: true,
+      message: isNewUser ? "Account created successfully." : "Login successful",
+      data: {
+        user: userResponse,
+        token,
+        isNewUser,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Add a mobile number to the account — allowed ONCE, only while no phone is set
+ *          (e.g. Google sign-in / email sign-up users). After that it stays locked.
+ * @route   PUT /api/auth/profile/phone
+ * @body    { phone: "9801234567" }  (10 digits; spaces, dashes and a leading +977/+91 are stripped)
+ * @access  Private
+ */
+export const setPhoneOnce = async (req, res, next) => {
+  try {
+    const raw = typeof req.body?.phone === "string" ? req.body.phone : "";
+    const phone = raw.replace(/[\s-]/g, "").replace(/^\+(977|91)/, "");
+
+    if (!/^\d{10}$/.test(phone)) {
+      return next(
+        new AppError("Please provide a valid 10-digit mobile number (digits only, e.g. 9801234567).", 400)
+      );
+    }
+
+    // Atomic: only succeeds while the phone is still empty, so it can never overwrite a set number.
+    const user = await User.findOneAndUpdate(
+      {
+        _id: req.user._id,
+        $or: [{ phone: "" }, { phone: null }, { phone: { $exists: false } }],
+      },
+      { $set: { phone } },
+      { new: true }
+    );
+
+    if (!user) {
+      return next(
+        new AppError("A mobile number is already linked to this account and cannot be changed.", 409)
+      );
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Mobile number added successfully.",
+      data: { user },
     });
   } catch (error) {
     next(error);

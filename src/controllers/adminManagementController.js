@@ -1565,6 +1565,53 @@ const ensureCustomerCategoriesBootstrapped = async () => {
   }
 };
 
+/**
+ * Public (no auth): active main categories with their active subcategories,
+ * sorted by displayOrder. Used by the customer website and app.
+ * GET /api/categories
+ */
+export const getPublicCategories = async (req, res, next) => {
+  try {
+    const rootCount = await Category.countDocuments({ level: 0 });
+    if (rootCount < CUSTOMER_SECTIONS.length) {
+      await ensureCustomerCategoriesBootstrapped().catch(() => {});
+    }
+
+    const categories = await Category.find({ isActive: true })
+      .select("name slug description image parentCategory level displayOrder")
+      .sort({ displayOrder: 1, name: 1 })
+      .lean();
+
+    const roots = categories.filter((c) => c.level === 0 || !c.parentCategory);
+    const data = roots.map((root) => ({
+      _id: root._id,
+      name: root.name,
+      slug: root.slug,
+      description: root.description || "",
+      image: root.image || "",
+      displayOrder: root.displayOrder,
+      subCategories: categories
+        .filter(
+          (c) =>
+            c.level === 1 &&
+            c.parentCategory &&
+            String(c.parentCategory) === String(root._id)
+        )
+        .map((c) => ({
+          _id: c._id,
+          name: c.name,
+          slug: c.slug,
+          image: c.image || "",
+          displayOrder: c.displayOrder,
+        })),
+    }));
+
+    res.status(200).json({ success: true, count: data.length, data });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const getCategoriesAdmin = async (req, res, next) => {
   try {
     const rootCount = await Category.countDocuments({ level: 0 });
@@ -2741,11 +2788,21 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
       await batchInsertNotifications(staffDocs);
 
       if (io) {
-        io.to("role:admin").emit("staff:notification", {
+        const staffPayload = {
           title,
           message: body,
+          type: "staff_alert",
           eventType: "staff_alert",
           data: notifData,
+          timestamp: new Date(),
+        };
+        io.to("role:admin").emit("staff:notification", staffPayload);
+        io.to("role:admin").emit("notification", staffPayload);
+        io.to("role_staff_admin").emit("staff:notification", staffPayload);
+        io.to("role_staff_admin").emit("notification", staffPayload);
+        staff.forEach((s) => {
+          io.to(`staff_${s._id.toString()}`).emit("notification", staffPayload);
+          io.to(`user:${s._id.toString()}`).emit("notification", staffPayload);
         });
       }
       sendPushToUsers({ userIds: staff.map((s) => s._id), title, body, data: notifData, channelId: "alerts" }).catch(() => {});
@@ -2881,12 +2938,18 @@ export const sendTargetedNotificationAdmin = async (req, res, next) => {
         });
 
         if (io) {
-          io.to(`user:${adminUser._id.toString()}`).emit("staff:notification", {
+          const specificPayload = {
             title,
             message: body,
+            type: "staff_alert",
             eventType: "staff_alert",
             data: notifData,
-          });
+            timestamp: new Date(),
+          };
+          io.to(`user:${adminUser._id.toString()}`).emit("staff:notification", specificPayload);
+          io.to(`user:${adminUser._id.toString()}`).emit("notification", specificPayload);
+          io.to(`staff_${adminUser._id.toString()}`).emit("notification", specificPayload);
+          io.to(`staff_${adminUser._id.toString()}`).emit("staff:notification", specificPayload);
         }
 
         // Dispatch Mobile Push Notification to Staff Devices

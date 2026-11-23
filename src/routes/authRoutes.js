@@ -14,6 +14,8 @@ import {
   updateProfile,
   uploadAvatar,
   removeAvatar,
+  googleAuth,
+  setPhoneOnce,
 } from "../controllers/authController.js";
 import {
   validateRegister,
@@ -67,6 +69,9 @@ router.post("/resend-verification-otp", otpLimiter, validateResendOTP, resendVer
 
 // Screen 1: Login & Logout
 router.post("/login", authLimiter, validateLogin, login);
+
+// Google Sign-In (ID token from Google Identity Services)
+router.post("/google", authLimiter, googleAuth);
 router.post("/logout", logout);
 
 // Screen 3: Forgot Password Flow
@@ -84,6 +89,8 @@ router.post("/change-password", protect, validateChangePassword, changePassword)
 // Current User Profile & Profile Update
 router.get("/me", protect, getMe);
 router.put("/profile", protect, updateProfile);
+// Add a mobile number once (only while empty); additive, does not change PUT /profile
+router.put("/profile/phone", protect, setPhoneOnce);
 
 // Avatar Upload & Delete (Cloudinary Integration)
 router.post("/profile/avatar", protect, upload.single("avatar"), uploadAvatar);

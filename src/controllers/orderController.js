@@ -317,10 +317,22 @@ export const createOrder = async (req, res, next) => {
       estimatedDeliveryTime: "15-25 mins",
     });
 
-    // ── 9. Clear Customer's Server Cart ────────────────────────────────
+    // ── 9. Clear Ordered Items from Customer's Server Cart ─────────────
+    const orderedProductIds = validatedOrderItems.map((item) =>
+      item.product.toString()
+    );
     await Cart.findOneAndUpdate(
       { user: customerId },
-      { $set: { items: [] } }
+      {
+        $pull: {
+          items: {
+            $or: [
+              { product: { $in: validatedOrderItems.map((i) => i.product) } },
+              { productId: { $in: orderedProductIds } },
+            ],
+          },
+        },
+      }
     ).catch(() => {});
 
     // Populate relations for response and real-time emission

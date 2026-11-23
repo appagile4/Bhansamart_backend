@@ -17,6 +17,11 @@ import {
 } from "../config/redis.js";
 import { releaseByUrls } from "../utils/storageQuota.js";
 
+// Escape user input before building a RegExp. "-" is left alone because the
+// filters below turn it into ".*" so slugs like "baby-care" still match.
+const escapeRegexKeepDash = (value) =>
+  String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /**
  * Helper to resolve Vendor for logged-in user
  */
@@ -989,10 +994,20 @@ export const getAllProducts = async (req, res, next) => {
         isStoreOpen: { $ne: false },
       };
       if (city && city.trim()) {
-        const cityRegex = new RegExp(city.trim(), "i");
+        const trimmedCity = city.trim();
+        let cityRegex;
+        if (/kathmandu|lalitpur|bhaktapur|bagmati|nepal/i.test(trimmedCity)) {
+          cityRegex = /kathmandu|lalitpur|bhaktapur|bagmati|nepal/i;
+        } else if (/delhi|new\s*delhi|noida|gurgaon|gurugram|ghaziabad|faridabad/i.test(trimmedCity)) {
+          cityRegex = /delhi|new\s*delhi|noida|gurgaon|gurugram|ghaziabad|faridabad/i;
+        } else {
+          cityRegex = new RegExp(escapeRegexKeepDash(trimmedCity), "i");
+        }
         activeVendorQuery.$or = [
           { "shippingLocations.city": cityRegex },
+          { "shippingLocations.state": cityRegex },
           { "sellerDetails.city": cityRegex },
+          { "businessDetails.city": cityRegex },
         ];
       }
       const eligibleVendors = await Vendor.find(activeVendorQuery).select("_id");
@@ -1021,13 +1036,13 @@ export const getAllProducts = async (req, res, next) => {
       } else if (/^gift/i.test(trimmed)) {
         catRegex = /gift/i;
       } else {
-        catRegex = new RegExp(trimmed.replace(/-/g, ".*"), "i");
+        catRegex = new RegExp(escapeRegexKeepDash(trimmed).replace(/-/g, ".*"), "i");
       }
       query.category = catRegex;
     }
 
     if (subCategory && subCategory !== "all" && subCategory !== "All") {
-      const trimmedSub = subCategory.trim().replace(/-/g, ".*");
+      const trimmedSub = escapeRegexKeepDash(subCategory.trim()).replace(/-/g, ".*");
       query.subCategory = new RegExp(trimmedSub, "i");
     }
 
@@ -1036,7 +1051,7 @@ export const getAllProducts = async (req, res, next) => {
     }
 
     if (search && search.trim()) {
-      const regex = new RegExp(search.trim(), "i");
+      const regex = new RegExp(escapeRegexKeepDash(search.trim()), "i");
       query.$or = [
         { name: regex },
         { category: regex },

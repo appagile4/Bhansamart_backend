@@ -132,6 +132,9 @@ export const initSocket = (httpServer) => {
     // Auto-join staff admin & vendor rooms
     if (socket.role === "admin" || socket.role === "superadmin") {
       socket.join(`role:${socket.role}`);
+      socket.join(`staff_${socket.userId}`);
+      socket.join("role_staff_admin");
+      socket.join("role:staff_admin");
       if (
         socket.user?.assignedVendors &&
         Array.isArray(socket.user.assignedVendors)
@@ -142,7 +145,7 @@ export const initSocket = (httpServer) => {
         }
       }
       console.log(
-        `[Socket] Admin/Staff ${socket.userId} joined role:${socket.role}`,
+        `[Socket] Admin/Staff ${socket.userId} joined role:${socket.role}, staff_${socket.userId} & role_staff_admin`,
       );
     }
 
@@ -966,14 +969,20 @@ export const notifyStaffAdminsForVendor = async ({
         // Idempotency or silent catch
       }
 
-      // Real-time emit to staff admin's private room
+      // Real-time emit to staff admin's private room & general notification channels
       if (io) {
-        io.to(`user:${staff._id.toString()}`).emit(eventType, {
+        const payload = {
           title,
           message,
+          type: eventType.startsWith("staff_") ? eventType : "staff_alert",
+          eventType,
           data: { ...data, vendorId: vStr },
           timestamp: new Date(),
-        });
+        };
+        io.to(`user:${staff._id.toString()}`).emit(eventType, payload);
+        io.to(`user:${staff._id.toString()}`).emit("notification", payload);
+        io.to(`staff_${staff._id.toString()}`).emit("notification", payload);
+        io.to(`staff_${staff._id.toString()}`).emit(eventType, payload);
       }
     }
     console.log(

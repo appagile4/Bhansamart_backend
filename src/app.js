@@ -29,7 +29,10 @@ import refundRoutes from "./routes/refundRoutes.js";
 import brandRoutes from "./routes/brandRoutes.js";
 import attributeRoutes from "./routes/attributeRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
-import { getActiveCheckoutPaymentMethods } from "./controllers/adminManagementController.js";
+import {
+  getActiveCheckoutPaymentMethods,
+  getPublicCategories,
+} from "./controllers/adminManagementController.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
 const app = express();
@@ -159,6 +162,9 @@ app.use("/api/admin/delivery", adminDeliveryRoutes);
 
 // Customer Checkout Config (Public)
 app.get("/api/checkout/payment-methods", getActiveCheckoutPaymentMethods);
+
+// Customer Category Catalog (Public, read-only)
+app.get("/api/categories", getPublicCategories);
 
 // Unified Superadmin & Admin Management System Routes
 app.use("/api/admin", adminRoutes);

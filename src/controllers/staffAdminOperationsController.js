@@ -134,21 +134,24 @@ export const getStaffDashboardOverview = async (req, res, next) => {
       vendorFilter = { $in: vendorObjectIds };
     }
 
-    const { timeframe = "today", startDate, endDate } = req.query;
+    // [SDB-09] Parse period/timeframe query parameter (supporting both mobile 'period' and web 'timeframe')
+    const rawPeriod = (req.query.period || req.query.timeframe || "today").toString().trim().toLowerCase().replace(/[\s_-]/g, "");
+    const { startDate, endDate } = req.query;
 
     // Date range calculation
     const now = new Date();
     let filterStart = new Date();
-    let filterEnd = now;
+    let filterEnd = new Date(now);
 
     if (startDate && endDate) {
       filterStart = new Date(startDate);
       filterEnd = new Date(endDate);
       filterEnd.setHours(23, 59, 59, 999);
     } else {
-      switch (timeframe) {
+      switch (rawPeriod) {
         case "today":
           filterStart.setHours(0, 0, 0, 0);
+          filterEnd.setHours(23, 59, 59, 999);
           break;
         case "yesterday":
           filterStart.setDate(now.getDate() - 1);
@@ -158,17 +161,23 @@ export const getStaffDashboardOverview = async (req, res, next) => {
           break;
         case "7days":
         case "last7days":
+        case "7d":
           filterStart.setDate(now.getDate() - 7);
+          filterStart.setHours(0, 0, 0, 0);
           break;
         case "30days":
         case "last30days":
+        case "30d":
           filterStart.setDate(now.getDate() - 30);
+          filterStart.setHours(0, 0, 0, 0);
           break;
-        case "thisMonth":
-          filterStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        case "thismonth":
+        case "month":
+          filterStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
           break;
         default:
           filterStart.setDate(now.getDate() - 7);
+          filterStart.setHours(0, 0, 0, 0);
       }
     }
 
