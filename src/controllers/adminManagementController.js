@@ -1572,11 +1572,6 @@ const ensureCustomerCategoriesBootstrapped = async () => {
  */
 export const getPublicCategories = async (req, res, next) => {
   try {
-    const rootCount = await Category.countDocuments({ level: 0 });
-    if (rootCount < CUSTOMER_SECTIONS.length) {
-      await ensureCustomerCategoriesBootstrapped().catch(() => {});
-    }
-
     const categories = await Category.find({ isActive: true })
       .select("name slug description image parentCategory level displayOrder")
       .sort({ displayOrder: 1, name: 1 })
@@ -1606,9 +1601,12 @@ export const getPublicCategories = async (req, res, next) => {
         })),
     }));
 
-    res.status(200).json({ success: true, count: data.length, data });
+    return res.status(200).json({ success: true, count: data.length, data });
   } catch (error) {
-    next(error);
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Failed to load categories from database",
+    });
   }
 };
 
