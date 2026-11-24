@@ -171,8 +171,6 @@ export const sendOtp = async (req, res, next) => {
         email: normalizedEmail,
         otpHash,
         purpose: resolvedPurpose,
-        attempts: 0,
-        maxAttempts: 5,
         resendAvailableAt,
         expiresAt,
         registrationTokenHash: null,
@@ -236,15 +234,6 @@ export const verifyOtp = async (req, res, next) => {
     const verification = otpDoc.verifyOTP(candidateOTP);
 
     if (!verification.valid) {
-      if (verification.reason === "MAX_ATTEMPTS_EXCEEDED") {
-        await CustomerOtp.deleteOne({ _id: otpDoc._id });
-        return next(
-          new AppError(
-            "Too many incorrect attempts. Please request a new verification code.",
-            429
-          )
-        );
-      }
       if (verification.reason === "EXPIRED") {
         return next(
           new AppError(
@@ -254,11 +243,9 @@ export const verifyOtp = async (req, res, next) => {
         );
       }
       // Invalid OTP
-      await otpDoc.save();
       return res.status(400).json({
         success: false,
-        message: `Invalid verification code. ${verification.remainingAttempts} attempts remaining.`,
-        remainingAttempts: verification.remainingAttempts,
+        message: "Invalid verification code. Please check and try again.",
       });
     }
 
