@@ -3,11 +3,15 @@ import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
+import path from "path";
+import { fileURLToPath } from "url";
 
 import authRoutes from "./routes/authRoutes.js";
+import customerAuthRoutes from "./routes/customerAuthRoutes.js";
 import vendorAuthRoutes from "./routes/vendorAuthRoutes.js";
 import vendorRoutes from "./routes/vendorRoutes.js";
 import productRoutes from "./routes/productRoutes.js";
+import categoryRoutes from "./routes/categoryRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
 import wishlistRoutes from "./routes/wishlistRoutes.js";
 import cartRoutes from "./routes/cartRoutes.js";
@@ -35,16 +39,28 @@ import {
 } from "./controllers/adminManagementController.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorMiddleware.js";
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 
+// 1. Security HTTP Headers with cross-origin asset support
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 
-// 1. Security HTTP Headers
-app.use(helmet());
+// Static files (Categories, banners, uploads)
+app.use("/images", express.static(path.join(__dirname, "../public/images")));
 
 // 2. Cross-Origin Resource Sharing (CORS) configuration for React Native & Web
 const allowedOrigins = [
   process.env.CLIENT_URL,
   "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:3001",
+  "http://127.0.0.1:3001",
   "http://localhost:8081", // React Native Metro Bundler
   "http://localhost:19006", // Expo Web
   "http://192.168.29.235:8081",
@@ -132,10 +148,13 @@ app.get("/api/health", (req, res) => {
 });
 
 // 6. Mount Feature Routes
+app.use("/api/customer/auth", customerAuthRoutes);
+app.use("/api/auth/customer", customerAuthRoutes);
 app.use("/api/auth/vendor", vendorAuthRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/vendor", vendorRoutes);
 app.use("/api/products", productRoutes);
+app.use("/api/categories", categoryRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/cart", cartRoutes);

@@ -299,3 +299,89 @@ export const sendVendorOTP = async (email, otp) => {
   });
 };
 
+/**
+ * Send Customer Authentication OTP (Login / Registration)
+ */
+export const sendCustomerAuthOTP = async (email, otp, purpose = "login") => {
+  console.log(`[DEV OTP] Customer ${purpose} OTP for ${email}: ${otp}`);
+
+  const isRegistration = purpose === "registration";
+  const title = isRegistration ? "Verify Your Email Address" : "Customer Login Verification";
+  const subtitle = isRegistration
+    ? "Welcome to BhansaMart! Use this code to verify your email and complete your account setup."
+    : "Use this 6-digit one-time password to sign in to your BhansaMart customer account.";
+
+  const digits = String(otp).split("");
+  const digitBoxes = digits
+    .map(
+      (d) =>
+        `<td style="width:44px;height:52px;background:#f0fdf4;border:2px solid #16a34a;border-radius:10px;text-align:center;font-size:28px;font-weight:800;color:#15803d;font-family:'Courier New',Courier,monospace;">${d}</td>`
+    )
+    .join('<td style="width:8px;"></td>');
+
+  const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+      <title>${title} - BhansaMart</title>
+    </head>
+    <body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fafc;padding:32px 16px;">
+        <tr>
+          <td align="center">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:500px;background:#ffffff;border-radius:18px;overflow:hidden;border:1px solid #e2e8f0;box-shadow:0 8px 30px rgba(0,0,0,0.06);">
+              <!-- Header -->
+              <tr>
+                <td style="background:linear-gradient(135deg, #008080 0%, #004d5d 100%);padding:28px 24px;text-align:center;">
+                  <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:800;letter-spacing:0.5px;">BhansaMart</h1>
+                  <p style="margin:6px 0 0;color:#a7f3d0;font-size:12px;letter-spacing:1px;text-transform:uppercase;font-weight:600;">Fresh Food & Kitchen Essentials</p>
+                </td>
+              </tr>
+              <!-- Body -->
+              <tr>
+                <td style="padding:32px 28px 24px;">
+                  <h2 style="margin:0 0 10px;font-size:19px;color:#0f172a;font-weight:700;">${title}</h2>
+                  <p style="margin:0 0 24px;color:#475569;font-size:14px;line-height:1.6;">
+                    ${subtitle} This code is valid for <strong>10 minutes</strong>.
+                  </p>
+                  <!-- OTP Digits -->
+                  <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 24px;">
+                    <tr>${digitBoxes}</tr>
+                  </table>
+                  <!-- Security Notice -->
+                  <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f0fdf4;border-left:4px solid #16a34a;border-radius:6px;">
+                    <tr>
+                      <td style="padding:12px 14px;">
+                        <p style="margin:0;font-size:12px;color:#166534;line-height:1.5;">
+                          &#128274; <strong>Security Tip:</strong> Never share this code with anyone. BhansaMart staff will never ask for your verification code.
+                        </p>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+              <!-- Footer -->
+              <tr>
+                <td style="background:#f8fafc;padding:18px 28px;text-align:center;border-top:1px solid #e2e8f0;">
+                  <p style="margin:0;font-size:11px;color:#94a3b8;">
+                    &copy; ${new Date().getFullYear()} BhansaMart &middot; Simplifying Your Kitchen Needs
+                  </p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+  `;
+
+  return sendEmail({
+    to: email,
+    subject: `BhansaMart - Your Verification Code is ${otp}`,
+    html,
+  });
+};
+
