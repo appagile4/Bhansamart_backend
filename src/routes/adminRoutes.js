@@ -69,6 +69,7 @@ import {
   requireSuperadminOnly,
 } from "../middleware/adminVendorScopeMiddleware.js";
 import { uploadSingleImage } from "../middleware/uploadMiddleware.js";
+import { requireMinImageSize } from "../middleware/imageSizeMiddleware.js";
 import { adminStorageRouter } from "./storageRoutes.js";
 
 const router = express.Router();
@@ -108,7 +109,7 @@ router.get("/delivery-boys", getAllDeliveryBoysAdmin);
 
 // 6. Catalog (Categories & Products)
 router.get("/categories", getCategoriesAdmin);
-router.post("/categories/upload-image", uploadSingleImage("image"), uploadCategoryImageAdmin);
+router.post("/categories/upload-image", uploadSingleImage("image"), requireMinImageSize("category", ["imageBase64", "image"]), uploadCategoryImageAdmin);
 router.post("/categories", createCategoryAdmin);
 router.put("/categories/:id", updateCategoryAdmin);
 router.get("/products", getAllProductsAdmin);

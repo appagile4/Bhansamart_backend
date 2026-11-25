@@ -29,6 +29,7 @@ import {
 } from "../middleware/validationMiddleware.js";
 import { protect } from "../middleware/authMiddleware.js";
 import { upload } from "../middleware/uploadMiddleware.js";
+import { requireMinImageSize } from "../middleware/imageSizeMiddleware.js";
 
 const router = express.Router();
 
@@ -93,8 +94,8 @@ router.put("/profile", protect, updateProfile);
 router.put("/profile/phone", protect, setPhoneOnce);
 
 // Avatar Upload & Delete (Cloudinary Integration)
-router.post("/profile/avatar", protect, upload.single("avatar"), uploadAvatar);
-router.put("/profile/avatar", protect, upload.single("avatar"), uploadAvatar);
+router.post("/profile/avatar", protect, upload.single("avatar"), requireMinImageSize("avatar", ["image", "avatar", "base64"]), uploadAvatar);
+router.put("/profile/avatar", protect, upload.single("avatar"), requireMinImageSize("avatar", ["image", "avatar", "base64"]), uploadAvatar);
 router.delete("/profile/avatar", protect, removeAvatar);
 
 export default router;

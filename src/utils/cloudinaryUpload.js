@@ -1,5 +1,5 @@
 import cloudinary from "../config/cloudinary.js";
-import { compressForUpload, presetForFolder } from "./imageCompressor.js";
+import { COMPRESSION_PRESETS, compressForUpload, presetForFolder } from "./imageCompressor.js";
 import { getStorageContext, assertCanUpload, estimateUploadBytes, trackUpload } from "./storageQuota.js";
 
 /**
@@ -20,6 +20,16 @@ const sanitizePath = (pathStr) => {
 };
 
 /**
+ * Profile photos get a square face crop; everything else (documents, QR codes, logos) is only
+ * scaled down to fit, never cropped.
+ */
+const sizeTransformFor = (presetName) => {
+  if (presetName === "avatar") return { width: 500, height: 500, crop: "fill", gravity: "face" };
+  const { maxWidth, maxHeight } = COMPRESSION_PRESETS[presetName] || COMPRESSION_PRESETS.default;
+  return { width: maxWidth, height: maxHeight, crop: "limit" };
+};
+
+/**
  * Upload an image buffer or base64 string to Cloudinary
  * @param {Buffer|string} fileSource - Buffer from multer or base64 string
  * @param {string} folder - Destination folder on Cloudinary
@@ -27,7 +37,9 @@ const sanitizePath = (pathStr) => {
  */
 export const uploadToCloudinary = async (fileSource, folder = "bhansamart/avatars") => {
   // Compress before upload (falls back to the original on any problem)
-  fileSource = await compressForUpload(fileSource, presetForFolder(folder));
+  const presetName = presetForFolder(folder);
+  const sizeTransform = sizeTransformFor(presetName);
+  fileSource = await compressForUpload(fileSource, presetName);
   // Vendor storage quota (only when the request was tagged by middleware/storageContext.js)
   const storageCtx = getStorageContext();
   if (storageCtx) await assertCanUpload(storageCtx.vendorId, estimateUploadBytes(fileSource));
@@ -41,7 +53,7 @@ export const uploadToCloudinary = async (fileSource, folder = "bhansamart/avatar
         {
           folder: safeFolder,
           transformation: [
-            { width: 500, height: 500, crop: "fill", gravity: "face" },
+            sizeTransform,
             { quality: "auto" },
             { fetch_format: "auto" },
           ],
@@ -59,7 +71,7 @@ export const uploadToCloudinary = async (fileSource, folder = "bhansamart/avatar
       {
         folder: safeFolder,
         transformation: [
-          { width: 500, height: 500, crop: "fill", gravity: "face" },
+          sizeTransform,
           { quality: "auto" },
           { fetch_format: "auto" },
         ],

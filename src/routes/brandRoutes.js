@@ -8,6 +8,7 @@ import {
 } from "../controllers/brandController.js";
 import { protect, authorizeRoles } from "../middleware/authMiddleware.js";
 import { uploadSingleImage } from "../middleware/uploadMiddleware.js";
+import { requireMinImageSize } from "../middleware/imageSizeMiddleware.js";
 
 const router = Router();
 
@@ -23,6 +24,7 @@ router.post(
   protect,
   authorizeRoles("vendor", "admin"),
   uploadSingleImage("logo"),
+  requireMinImageSize("logo"),
   createBrandRequest
 );
 
