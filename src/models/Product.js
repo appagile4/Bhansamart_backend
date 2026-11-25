@@ -302,6 +302,10 @@ productSchema.index({ category: 1, price: 1, isDeleted: 1 });
 productSchema.index({ category: 1, ratingsCount: -1, ratingsAverage: -1 });
 productSchema.index({ vendor: 1, isDeleted: 1, createdAt: -1 });
 productSchema.index({ isDeleted: 1, status: 1, inStock: 1 });
+productSchema.index({ slug: 1, isDeleted: 1 });
+productSchema.index({ "visibility.isFeatured": 1, isDeleted: 1, status: 1 });
+productSchema.index({ "visibility.isBestSeller": 1, isDeleted: 1, status: 1 });
+productSchema.index({ "visibility.isNewArrival": 1, isDeleted: 1, status: 1 });
 productSchema.index({
   name: "text",
   category: "text",

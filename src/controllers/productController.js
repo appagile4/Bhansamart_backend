@@ -13,6 +13,7 @@ import {
 import {
   getCache,
   setCache,
+  deleteCache,
   invalidateCachePattern,
 } from "../config/redis.js";
 import { releaseByUrls } from "../utils/storageQuota.js";
@@ -285,6 +286,9 @@ export const createProduct = async (req, res, next) => {
 
     // Invalidate product cache in Redis asynchronously
     invalidateCachePattern("products:*").catch(() => {});
+    if (id) deleteCache(`product:details:${id.toLowerCase()}`).catch(() => {});
+    if (updatedProduct?._id) deleteCache(`product:details:${updatedProduct._id.toString().toLowerCase()}`).catch(() => {});
+    if (updatedProduct?.slug) deleteCache(`product:details:${updatedProduct.slug.toLowerCase()}`).catch(() => {});
 
     res.status(201).json({
       success: true,
@@ -404,16 +408,33 @@ export const getVendorProducts = async (req, res, next) => {
 export const getProductById = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const isObjectId = Boolean(id.match(/^[0-9a-fA-F]{24}$/));
+    const detailsCacheKey = `product:details:${id.toLowerCase()}`;
+
+    // Return from Redis cache if view increment is not requested
+    if (req.query.incrementView !== "true") {
+      const cached = await getCache(detailsCacheKey);
+      if (cached) {
+        return res.status(200).json({
+          success: true,
+          product: cached,
+          fromCache: true,
+        });
+      }
+    }
+
     let product;
 
-    if (id.match(/^[0-9a-fA-F]{24}$/)) {
+    if (isObjectId) {
       product = await Product.findOne({ _id: id, isDeleted: false })
         .populate("vendor", "businessDetails sellerDetails brandDetails")
-        .populate("brandRef", "name logo categories status");
+        .populate("brandRef", "name logo categories status")
+        .lean(!req.query.incrementView || req.query.incrementView !== "true");
     } else {
       product = await Product.findOne({ slug: id, isDeleted: false })
         .populate("vendor", "businessDetails sellerDetails brandDetails")
-        .populate("brandRef", "name logo categories status");
+        .populate("brandRef", "name logo categories status")
+        .lean(!req.query.incrementView || req.query.incrementView !== "true");
     }
 
     if (!product) {
@@ -423,21 +444,26 @@ export const getProductById = async (req, res, next) => {
       });
     }
 
-    // Automatically record view if customer view requested
+    // Automatically record view if customer view requested (non-blocking)
     if (req.query.incrementView === "true") {
-      product.views = (product.views || 0) + 1;
-      if (product.views > 0) {
-        product.conversionRate = Math.min(
-          100,
-          Math.round(((product.ordersCount || 0) / product.views) * 100)
-        );
-      }
-      await product.save();
+      Product.findByIdAndUpdate(product._id, { $inc: { views: 1 } }).catch(() => {});
+    }
+
+    const productData = product.toObject ? product.toObject() : product;
+
+    // Cache in Redis with 600s (10 minutes) TTL
+    setCache(detailsCacheKey, productData, 600).catch(() => {});
+    if (productData._id) {
+      setCache(`product:details:${productData._id.toString().toLowerCase()}`, productData, 600).catch(() => {});
+    }
+    if (productData.slug) {
+      setCache(`product:details:${productData.slug.toLowerCase()}`, productData, 600).catch(() => {});
     }
 
     res.status(200).json({
       success: true,
-      product,
+      product: productData,
+      fromCache: false,
     });
   } catch (error) {
     next(error);
@@ -767,6 +793,9 @@ export const updateProduct = async (req, res, next) => {
 
     // Invalidate product cache in Redis asynchronously
     invalidateCachePattern("products:*").catch(() => {});
+    if (id) deleteCache(`product:details:${id.toLowerCase()}`).catch(() => {});
+    if (updatedProduct?._id) deleteCache(`product:details:${updatedProduct._id.toString().toLowerCase()}`).catch(() => {});
+    if (updatedProduct?.slug) deleteCache(`product:details:${updatedProduct.slug.toLowerCase()}`).catch(() => {});
 
     res.status(200).json({
       success: true,
@@ -815,6 +844,9 @@ export const toggleProductStock = async (req, res, next) => {
 
     // Invalidate product cache in Redis asynchronously
     invalidateCachePattern("products:*").catch(() => {});
+    if (id) deleteCache(`product:details:${id.toLowerCase()}`).catch(() => {});
+    if (updatedProduct?._id) deleteCache(`product:details:${updatedProduct._id.toString().toLowerCase()}`).catch(() => {});
+    if (updatedProduct?.slug) deleteCache(`product:details:${updatedProduct.slug.toLowerCase()}`).catch(() => {});
 
     res.status(200).json({
       success: true,
@@ -859,6 +891,9 @@ export const deleteProduct = async (req, res, next) => {
 
     // Invalidate product cache in Redis asynchronously
     invalidateCachePattern("products:*").catch(() => {});
+    if (id) deleteCache(`product:details:${id.toLowerCase()}`).catch(() => {});
+    if (updatedProduct?._id) deleteCache(`product:details:${updatedProduct._id.toString().toLowerCase()}`).catch(() => {});
+    if (updatedProduct?.slug) deleteCache(`product:details:${updatedProduct.slug.toLowerCase()}`).catch(() => {});
 
     // Optionally delete from Cloudinary
     if (product.images && product.images.length > 0) {
@@ -902,6 +937,14 @@ export const getAllProducts = async (req, res, next) => {
       longitude,
       page = 1,
       limit = 20,
+      featured,
+      isFeatured,
+      bestSeller,
+      isBestSeller,
+      newArrival,
+      isNewArrival,
+      trending,
+      isTrending,
     } = req.query;
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
@@ -911,8 +954,13 @@ export const getAllProducts = async (req, res, next) => {
     const customerLng = parseFloat(lng || longitude);
     const hasCoordinates = !isNaN(customerLat) && !isNaN(customerLng);
 
+    const featFlag = isFeatured === "true" || featured === "true";
+    const bestFlag = isBestSeller === "true" || bestSeller === "true";
+    const newArrFlag = isNewArrival === "true" || newArrival === "true";
+    const trendFlag = isTrending === "true" || trending === "true";
+
     // ── 1. Redis Cache Strategy ─────────────────────────────────────────
-    const cacheKey = `products:cat:${(category || "all").toLowerCase()}:sub:${(subCategory || "all").toLowerCase()}:brand:${(brand || "all").toLowerCase()}:search:${(search || "").trim().toLowerCase()}:vendor:${vendorId || "all"}:city:${city || "all"}:coord:${hasCoordinates ? `${customerLat.toFixed(3)},${customerLng.toFixed(3)}` : "none"}:min:${minPrice || ""}:max:${maxPrice || ""}:sort:${sortBy}:inStock:${inStockOnly || "false"}:page:${pageNum}:limit:${limitNum}`;
+    const cacheKey = `products:cat:${(category || "all").toLowerCase()}:sub:${(subCategory || "all").toLowerCase()}:brand:${(brand || "all").toLowerCase()}:search:${(search || "").trim().toLowerCase()}:vendor:${vendorId || "all"}:city:${city || "all"}:coord:${hasCoordinates ? `${customerLat.toFixed(3)},${customerLng.toFixed(3)}` : "none"}:min:${minPrice || ""}:max:${maxPrice || ""}:sort:${sortBy}:inStock:${inStockOnly || "false"}:feat:${featFlag}:best:${bestFlag}:newArr:${newArrFlag}:trend:${trendFlag}:page:${pageNum}:limit:${limitNum}`;
 
     const cachedResult = await getCache(cacheKey);
     if (cachedResult) {
@@ -1061,6 +1109,19 @@ export const getAllProducts = async (req, res, next) => {
       ];
     }
 
+    if (featFlag) {
+      query.$or = [{ isFeatured: true }, { "visibility.isFeatured": true }];
+    }
+    if (bestFlag) {
+      query.$or = [{ isBestSeller: true }, { "visibility.isBestSeller": true }];
+    }
+    if (newArrFlag) {
+      query.$or = [{ isNewArrival: true }, { "visibility.isNewArrival": true }];
+    }
+    if (trendFlag) {
+      query.$or = [{ isTrending: true }, { "visibility.isTrending": true }];
+    }
+
     if (minPrice != null || maxPrice != null) {
       query.price = {};
       if (minPrice != null && !isNaN(Number(minPrice))) {
@@ -1108,6 +1169,7 @@ export const getAllProducts = async (req, res, next) => {
       eligibleVendorsCount: eligibleVendorIds.length,
       isOutsideDeliveryZone,
       products,
+      fromCache: false,
     };
 
     // Store in Redis with TTL 300 seconds (5 minutes)

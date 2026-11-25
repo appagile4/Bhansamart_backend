@@ -1,4 +1,5 @@
 import Category from "../models/Category.js";
+import { getCache, setCache } from "../config/redis.js";
 
 /**
  * @desc    Get all public categories (default top-level sorted by displayOrder)
@@ -8,6 +9,15 @@ import Category from "../models/Category.js";
 export const getCategories = async (req, res, next) => {
   try {
     const { level, active = "true", all } = req.query;
+
+    const cacheKey = `catalog:categories:level:${level !== undefined ? level : 0}:active:${active}:all:${all || "false"}`;
+    const cached = await getCache(cacheKey);
+    if (cached) {
+      return res.status(200).json({
+        ...cached,
+        fromCache: true,
+      });
+    }
 
     const query = {};
     if (active === "true") {
@@ -45,10 +55,17 @@ export const getCategories = async (req, res, next) => {
       };
     });
 
-    return res.status(200).json({
+    const responsePayload = {
       success: true,
       count: formattedCategories.length,
       data: formattedCategories,
+    };
+
+    setCache(cacheKey, responsePayload, 900).catch(() => {});
+
+    return res.status(200).json({
+      ...responsePayload,
+      fromCache: false,
     });
   } catch (error) {
     next(error);
