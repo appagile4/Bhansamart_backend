@@ -7,6 +7,7 @@ import connectDB from "./config/db.js";
 import { initSocket } from "./socket/socketManager.js";
 import { recoverStaleAssignments } from "./utils/dispatchEngine.js";
 import { closeRedis } from "./config/redis.js";
+import redisDispatchService from "./services/redisDispatchService.js";
 
 // Handle uncaught exceptions across the application
 process.on("uncaughtException", (err) => {
@@ -26,8 +27,11 @@ const server = http.createServer(app);
 // Initialize Socket.IO with unified HTTP Server
 initSocket(server);
 
-// Background recovery for stale delivery assignments across server restarts
+// Background recovery for stale delivery assignments & Redis rider reconciliation across server restarts
 setTimeout(() => {
+  redisDispatchService.reconcileOnlineRiders().catch((err) =>
+    console.warn("[Redis Rider Reconciliation warning]:", err.message)
+  );
   recoverStaleAssignments().catch((err) =>
     console.warn("[Recovery Stale Assignments warning]:", err.message)
   );

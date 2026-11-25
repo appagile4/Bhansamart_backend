@@ -7,6 +7,7 @@ import VendorTransaction from "../models/VendorTransaction.js";
 import VendorNotification from "../models/VendorNotification.js";
 import DeliveryEarningsLedger from "../models/DeliveryEarningsLedger.js";
 import Refund from "../models/Refund.js";
+import redisDispatchService from "../services/redisDispatchService.js";
 import { sendPushToUsers, sendPushToVendors } from "../services/pushNotificationService.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import {
@@ -274,10 +275,12 @@ export const acceptAssignment = async (req, res, next) => {
       }
     }
 
-    // Mark delivery partner as BUSY
+    // Mark delivery partner as BUSY in MongoDB and Redis
     deliveryBoy.availability = "BUSY";
     deliveryBoy.activeOrderId = order._id;
     await deliveryBoy.save();
+    await redisDispatchService.setRiderBusy(deliveryBoy._id, order._id);
+    await redisDispatchService.clearDispatchOffer(order._id, deliveryBoy._id);
 
     // Persistent delivery confirmation notification
     await createDeliveryNotification({
@@ -295,14 +298,24 @@ export const acceptAssignment = async (req, res, next) => {
       category: "delivery",
     });
 
+    const confirmedPayload = {
+      assignmentId: assignment._id,
+      orderId: order._id,
+      orderNumber: order.orderNumber,
+      deliveryBoyId: deliveryBoy._id,
+    };
+
     emitToDeliveryPartner(
       deliveryBoy._id.toString(),
       "delivery:assignment:confirmed",
-      {
-        assignmentId: assignment._id,
-        orderId: order._id,
-        orderNumber: order.orderNumber,
-      },
+      confirmedPayload,
+      req.user._id.toString()
+    );
+
+    emitToDeliveryPartner(
+      deliveryBoy._id.toString(),
+      "dispatch:assignment:confirmed",
+      confirmedPayload,
       req.user._id.toString()
     );
 
@@ -369,6 +382,7 @@ export const rejectAssignment = async (req, res, next) => {
     }
 
     clearOrderDispatchTimer(assignment.order);
+    await redisDispatchService.clearDispatchOffer(assignment.order, deliveryBoy._id);
 
     // Update attempts array
     await DeliveryAssignment.updateOne(
@@ -785,11 +799,12 @@ export const verifyDeliveryOtp = async (req, res, next) => {
       deliveryBoy.wallet.totalEarned = Math.round(((deliveryBoy.wallet.totalEarned || 0) + totalEarnings) * 100) / 100;
     }
 
-    // Update DeliveryBoy Availability & metrics
+    // Update DeliveryBoy Availability & metrics in MongoDB and Redis
     deliveryBoy.availability = "ONLINE"; // Available for next delivery
     deliveryBoy.activeOrderId = null;
     deliveryBoy.metrics.totalDeliveries += 1;
     await deliveryBoy.save();
+    await redisDispatchService.setRiderAvailable(deliveryBoy._id);
 
     // Real-time broadcast
     emitOrderStatusUpdate(order._id.toString(), order.customer?._id?.toString(), order);
@@ -895,6 +910,7 @@ export const cancelActiveDelivery = async (req, res, next) => {
     deliveryBoy.activeOrderId = null;
     deliveryBoy.availability = "ONLINE";
     await deliveryBoy.save();
+    await redisDispatchService.setRiderAvailable(deliveryBoy._id);
 
     await createDeliveryNotification({
       deliveryBoyId: deliveryBoy._id,

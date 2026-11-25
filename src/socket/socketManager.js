@@ -5,6 +5,7 @@ import Vendor from "../models/Vendor.js";
 import Order from "../models/Order.js";
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import Notification from "../models/Notification.js";
+import redisDispatchService from "../services/redisDispatchService.js";
 
 let io = null;
 
@@ -118,10 +119,13 @@ export const initSocket = (httpServer) => {
     // Auto-join delivery room if authorized delivery partner
     if (socket.deliveryBoyId) {
       const deliveryRoom = `delivery:${socket.deliveryBoyId}`;
+      const riderRoom = `rider:${socket.deliveryBoyId}`;
       socket.join(deliveryRoom);
+      socket.join(riderRoom);
+      socket.join(`rider:${socket.userId}`);
       socket.join("delivery:portal");
       console.log(
-        `[Socket] Delivery Partner ${socket.deliveryBoyId} joined room ${deliveryRoom} & delivery:portal`,
+        `[Socket] Delivery Partner ${socket.deliveryBoyId} joined rooms: ${deliveryRoom}, ${riderRoom} & delivery:portal`,
       );
       emitDeliveryPartnerStatus(socket.deliveryBoyId, {
         availability: "ONLINE",
@@ -129,12 +133,13 @@ export const initSocket = (httpServer) => {
       });
     }
 
-    // Auto-join staff admin & vendor rooms
+    // Auto-join staff admin & dispatch console rooms
     if (socket.role === "admin" || socket.role === "superadmin") {
       socket.join(`role:${socket.role}`);
       socket.join(`staff_${socket.userId}`);
       socket.join("role_staff_admin");
       socket.join("role:staff_admin");
+      socket.join("admin:dispatch");
       if (
         socket.user?.assignedVendors &&
         Array.isArray(socket.user.assignedVendors)
@@ -145,7 +150,7 @@ export const initSocket = (httpServer) => {
         }
       }
       console.log(
-        `[Socket] Admin/Staff ${socket.userId} joined role:${socket.role}, staff_${socket.userId} & role_staff_admin`,
+        `[Socket] Admin/Staff ${socket.userId} joined role:${socket.role}, admin:dispatch & role_staff_admin`,
       );
     }
 
@@ -423,8 +428,8 @@ export const initSocket = (httpServer) => {
       }
     });
 
-    // ── 7. Client Event: Delivery Partner GPS Location Update ───────────
-    socket.on("delivery:location:update", async (data, ack) => {
+    // ── 7. Client Event: Delivery Partner GPS Location Update (rider:location:update & delivery:location:update) ───
+    const handleLocationUpdate = async (data, ack) => {
       try {
         if (!socket.deliveryBoyId) {
           if (typeof ack === "function")
@@ -445,7 +450,16 @@ export const initSocket = (httpServer) => {
 
         const now = new Date();
 
-        // 1. Update delivery partner's current location in database
+        // 1. Sync coordinates to Redis for sub-millisecond dispatch lookups
+        await redisDispatchService.updateRiderLocation(
+          socket.deliveryBoyId,
+          lng,
+          lat,
+          data?.heading || 0,
+          data?.speed || 0
+        );
+
+        // 2. Update delivery partner's current location in database
         const partner = await DeliveryBoy.findByIdAndUpdate(
           socket.deliveryBoyId,
           {
@@ -460,7 +474,20 @@ export const initSocket = (httpServer) => {
           { returnDocument: "after" },
         );
 
-        // 2. If partner is actively fulfilling an order, sync coordinates and broadcast
+        const locPayload = {
+          orderId: partner?.activeOrderId || null,
+          deliveryBoyId: socket.deliveryBoyId,
+          latitude: lat,
+          longitude: lng,
+          heading: data.heading || 0,
+          speed: data.speed || 0,
+          updatedAt: now,
+        };
+
+        // 3. Broadcast to admin dispatch console
+        io.to("admin:dispatch").emit("admin:dispatch:rider_location", locPayload);
+
+        // 4. If partner is actively fulfilling an order, sync coordinates and broadcast to order room
         if (partner?.activeOrderId) {
           await Order.findByIdAndUpdate(partner.activeOrderId, {
             $set: {
@@ -473,16 +500,6 @@ export const initSocket = (httpServer) => {
           });
 
           // Broadcast to customer and vendor tracking this order room
-          const locPayload = {
-            orderId: partner.activeOrderId,
-            deliveryBoyId: socket.deliveryBoyId,
-            latitude: lat,
-            longitude: lng,
-            heading: data.heading || 0,
-            speed: data.speed || 0,
-            updatedAt: now,
-          };
-
           io.to(`order:${partner.activeOrderId}`).emit(
             "delivery:location:update",
             locPayload,
@@ -493,9 +510,92 @@ export const initSocket = (httpServer) => {
           ack({ success: true, timestamp: now });
         }
       } catch (err) {
-        console.error("[delivery:location:update error]:", err);
+        console.error("[rider:location:update error]:", err);
         if (typeof ack === "function")
           ack({ success: false, message: err.message });
+      }
+    };
+
+    socket.on("delivery:location:update", handleLocationUpdate);
+    socket.on("rider:location:update", handleLocationUpdate);
+
+    // ── 7B. Client Event: Rider Online / Offline Toggle ────────────────
+    socket.on("rider:online", async (data, ack) => {
+      try {
+        if (!socket.deliveryBoyId) {
+          if (typeof ack === "function") ack({ success: false, message: "Unauthorized rider" });
+          return;
+        }
+        const partner = await DeliveryBoy.findById(socket.deliveryBoyId);
+        if (!partner || !partner.canGoOnline()) {
+          if (typeof ack === "function")
+            ack({ success: false, message: "Rider approval or deposit requirement not met" });
+          return;
+        }
+
+        partner.availability = "ONLINE";
+        partner.lastLocationUpdatedAt = new Date();
+        await partner.save();
+
+        const coords = partner.currentLocation?.coordinates;
+        await redisDispatchService.setRiderOnline(
+          partner._id,
+          Array.isArray(coords) ? coords[0] : 85.324,
+          Array.isArray(coords) ? coords[1] : 27.7172
+        );
+
+        emitDeliveryPartnerStatus(partner._id, {
+          deliveryBoyId: partner._id.toString(),
+          availability: "ONLINE",
+          isOnline: true,
+          isBusy: false,
+        });
+
+        io.to("admin:dispatch").emit("admin:dispatch:rider_online", {
+          deliveryBoyId: partner._id.toString(),
+          fullName: partner.fullName,
+        });
+
+        if (typeof ack === "function") ack({ success: true, availability: "ONLINE" });
+      } catch (err) {
+        if (typeof ack === "function") ack({ success: false, message: err.message });
+      }
+    });
+
+    socket.on("rider:offline", async (data, ack) => {
+      try {
+        if (!socket.deliveryBoyId) {
+          if (typeof ack === "function") ack({ success: false, message: "Unauthorized rider" });
+          return;
+        }
+        const partner = await DeliveryBoy.findById(socket.deliveryBoyId);
+        if (partner?.activeOrderId) {
+          if (typeof ack === "function")
+            ack({ success: false, message: "Cannot go offline while fulfilling an active delivery" });
+          return;
+        }
+
+        if (partner) {
+          partner.availability = "OFFLINE";
+          await partner.save();
+        }
+
+        await redisDispatchService.setRiderOffline(socket.deliveryBoyId);
+
+        emitDeliveryPartnerStatus(socket.deliveryBoyId, {
+          deliveryBoyId: socket.deliveryBoyId.toString(),
+          availability: "OFFLINE",
+          isOnline: false,
+          isBusy: false,
+        });
+
+        io.to("admin:dispatch").emit("admin:dispatch:rider_offline", {
+          deliveryBoyId: socket.deliveryBoyId.toString(),
+        });
+
+        if (typeof ack === "function") ack({ success: true, availability: "OFFLINE" });
+      } catch (err) {
+        if (typeof ack === "function") ack({ success: false, message: err.message });
       }
     });
 
