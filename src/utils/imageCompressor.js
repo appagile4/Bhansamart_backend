@@ -13,7 +13,8 @@ import sharp from "sharp";
  *
  * Quality approach: only downscale images larger than the preset's max size (never upscale),
  * re-encode to WebP at a visually-lossless quality, and use LOSSLESS for QR codes so they stay
- * scannable. EXIF orientation is applied, then metadata (GPS, camera info) is stripped.
+ * scannable. Pixels are NEVER rotated: if a phone photo carries an orientation tag, only that tag is kept
+ * so it displays exactly as the user saw it; all other metadata (GPS, camera info) is stripped.
  */
 
 export const COMPRESSION_PRESETS = {
@@ -85,8 +86,7 @@ export async function compressImage(input, presetName = "default") {
     if (meta.format === "svg") return passthrough("svg");
     if ((meta.pages || 1) > 1) return passthrough("animated");
 
-    const pipeline = sharp(input, { failOn: "none", limitInputPixels: MAX_INPUT_PIXELS })
-      .rotate() // apply EXIF orientation (phone photos), metadata is stripped on output
+    let pipeline = sharp(input, { failOn: "none", limitInputPixels: MAX_INPUT_PIXELS })
       .resize({
         width: preset.maxWidth,
         height: preset.maxHeight,
@@ -103,7 +103,20 @@ export async function compressImage(input, presetName = "default") {
           effort: 4,
         };
 
-    const { data, info } = await pipeline.webp(webpOptions).toBuffer({ resolveWithObject: true });
+    // Orientation tag present: keep it (and nothing else) instead of rotating the pixels.
+    // JPEG is used for these because its orientation tag is the most widely supported.
+    const hasOrientationTag = (meta.orientation || 1) > 1;
+    if (hasOrientationTag) pipeline = pipeline.withExif({ IFD0: { Orientation: String(meta.orientation) } });
+    const asJpeg = hasOrientationTag && !meta.hasAlpha;
+    pipeline = asJpeg
+      ? pipeline.jpeg({
+          quality: preset.lossless ? 95 : preset.quality,
+          chromaSubsampling: preset.lossless ? "4:4:4" : "4:2:0",
+          mozjpeg: true,
+        })
+      : pipeline.webp(webpOptions);
+
+    const { data, info } = await pipeline.toBuffer({ resolveWithObject: true });
 
     // Never make an image bigger (e.g. already-optimised files)
     if (data.length >= originalBytes) return passthrough("not smaller");
@@ -111,8 +124,8 @@ export async function compressImage(input, presetName = "default") {
     return {
       buffer: data,
       compressed: true,
-      contentType: "image/webp",
-      format: "webp",
+      contentType: asJpeg ? "image/jpeg" : "image/webp",
+      format: asJpeg ? "jpeg" : "webp",
       width: info.width,
       height: info.height,
       originalBytes,

@@ -63,10 +63,9 @@ export const getAllDeliveryPartners = async (req, res, next) => {
  */
 export const getDeliveryPartnerById = async (req, res, next) => {
   try {
-    const partner = await DeliveryBoy.findById(req.params.id).populate(
-      "user",
-      "name email phone isActive status"
-    );
+    const partner = await DeliveryBoy.findById(req.params.id)
+      .populate("user", "name email phone isActive status")
+      .populate("activeOrderId", "orderNumber totalAmount orderStatus paymentMethod paymentStatus createdAt");
 
     if (!partner) {
       return next(new AppError("Delivery partner not found", 404));
@@ -76,12 +75,20 @@ export const getDeliveryPartnerById = async (req, res, next) => {
       createdAt: -1,
     });
 
+    const recentOrders = await Order.find({ assignedDeliveryBoy: partner._id })
+      .populate("vendor", "businessDetails.businessName name")
+      .populate("customer", "name phone")
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
     res.status(200).json({
       success: true,
       partner: partner.getMaskedProfile(),
       canGoOnline: partner.canGoOnline(),
       allDocumentsVerified: partner.areAllDocumentsVerified(),
       depositHistory: depositLedger,
+      recentOrders: recentOrders || [],
     });
   } catch (error) {
     next(error);
