@@ -19,6 +19,7 @@ import { logAdminAction } from "../services/auditService.js";
 import { getIO, emitVendorNotification, emitToDeliveryPartner } from "../socket/socketManager.js";
 import { sendPushToUsers, sendPushToVendors, sendPushToDeliveryPartners, sendPushToRoles } from "../services/pushNotificationService.js";
 import { uploadCategoryImageToCloudinary } from "../utils/cloudinaryUpload.js";
+import { invalidateCache, deleteCache } from "../config/redis.js";
 
 // Helper to build date range from timeframe filter
 const getDateRangeFilter = (timeframe, startDate, endDate) => {
@@ -1689,6 +1690,10 @@ export const createCategoryAdmin = async (req, res, next) => {
       details: `Created category ${category.name} (${level === 0 ? "Root" : "Subcategory"})`,
     });
 
+    // Invalidate category and product caches
+    invalidateCache("catalog:categories:*").catch(() => {});
+    invalidateCache("products:*").catch(() => {});
+
     res.status(201).json({
       success: true,
       message: "Category created successfully",
@@ -1765,6 +1770,10 @@ export const updateCategoryAdmin = async (req, res, next) => {
       targetId: category._id,
       details: `Updated category ${category.name} (Active: ${category.isActive})`,
     });
+
+    // Invalidate category and product caches
+    invalidateCache("catalog:categories:*").catch(() => {});
+    invalidateCache("products:*").catch(() => {});
 
     res.status(200).json({
       success: true,
@@ -1931,6 +1940,11 @@ export const moderateProductAdmin = async (req, res, next) => {
     }
 
     await product.save();
+
+    // Invalidate product listings and specific product details in Redis
+    invalidateCache("products:*").catch(() => {});
+    if (product?._id) deleteCache(`product:details:${product._id.toString().toLowerCase()}`).catch(() => {});
+    if (product?.slug) deleteCache(`product:details:${product.slug.toLowerCase()}`).catch(() => {});
 
     await logAdminAction({
       req,

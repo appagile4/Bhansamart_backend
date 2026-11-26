@@ -5,6 +5,8 @@ import DeliveryBoy from "../models/DeliveryBoy.js";
 import DeliveryAssignment from "../models/DeliveryAssignment.js";
 import Order from "../models/Order.js";
 import Vendor from "../models/Vendor.js";
+import DispatchSettings from "../models/DispatchSettings.js";
+import redisDispatchService, { calculateDistanceKm } from "../services/redisDispatchService.js";
 import {
   emitToDeliveryPartner,
   emitToOrderRoom,
@@ -13,18 +15,18 @@ import {
 import { sendPushToDeliveryPartners } from "../services/pushNotificationService.js";
 import { createDeliveryNotification } from "../services/deliveryNotificationService.js";
 
-// Configurable operational limits
-export const TIMEOUT_SECONDS = 60; // 60-second acceptance window
-export const RETRY_DELAY_MS = 20000; // 20s delay when no riders are currently free
+// Re-export calculateDistanceKm
+export { calculateDistanceKm };
+
+// Fallback constants
+export const TIMEOUT_SECONDS = 20; // Default 20-second quick-commerce offer window
+export const RETRY_DELAY_MS = 15000; // 15-second delay when no riders free
 export const MAX_DISPATCH_ATTEMPTS = 5;
 export const DEFAULT_VENDOR_RADIUS_KM = 5;
 export const MAX_SEARCH_DISTANCE_KM = 30;
 
-// In-memory registry to avoid scheduling duplicate concurrent timers for the same order
+// In-memory timer registry to clear pending timeouts if order is accepted/cancelled early
 const activeOrderTimers = new Map();
-
-// In-memory mutex lock to prevent concurrent duplicate dispatch runs for the same order
-const dispatchInProgressLocks = new Set();
 
 /**
  * Generate a cryptographically secure 4-digit OTP
@@ -50,36 +52,54 @@ export const verifyHashedOTP = async (plainOtp, hashedOtp) => {
 };
 
 /**
- * Calculate Haversine distance between two coordinates in kilometers
+ * Multi-factor Weighted Rider Ranking Algorithm
+ * Scores rider from 0.0 (worst) to 1.0 (best)
  */
-export const calculateDistanceKm = (lat1, lon1, lat2, lon2) => {
-  const R = 6371; // Earth's radius in km
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return Math.round(R * c * 10) / 10;
+export const calculateRiderScore = ({
+  distanceKm,
+  etaMinutes,
+  activeDeliveriesCount = 0,
+  maxActiveOrders = 1,
+  locationAgeSeconds = 0,
+  rating = 5.0,
+  acceptanceRate = 100,
+  weights = {},
+}) => {
+  const wDist = weights.distanceWeight ?? 0.4;
+  const wEta = weights.etaWeight ?? 0.25;
+  const wWorkload = weights.workloadWeight ?? 0.15;
+  const wFreshness = weights.locationFreshnessWeight ?? 0.1;
+  const wAcceptance = weights.acceptanceRateWeight ?? 0.1;
+
+  // 1. Distance score: 0 km = 1.0, 15 km = 0.0
+  const distanceScore = Math.max(0, 1 - distanceKm / 15);
+
+  // 2. ETA score: 0 mins = 1.0, 30 mins = 0.0
+  const etaScore = Math.max(0, 1 - etaMinutes / 30);
+
+  // 3. Workload score: 0 active orders = 1.0, full capacity = 0.0
+  const workloadScore = Math.max(0, 1 - activeDeliveriesCount / maxActiveOrders);
+
+  // 4. Freshness score: 0-60s = 1.0, > 900s (15 mins) = 0.0
+  const freshnessScore = Math.max(0, 1 - locationAgeSeconds / 900);
+
+  // 5. Performance score: combines 5-star rating and acceptance %
+  const normRating = Math.min(1, Math.max(0, (rating || 5) / 5));
+  const normAcceptance = Math.min(1, Math.max(0, (acceptanceRate || 100) / 100));
+  const performanceScore = normRating * 0.5 + normAcceptance * 0.5;
+
+  const totalScore =
+    distanceScore * wDist +
+    etaScore * wEta +
+    workloadScore * wWorkload +
+    freshnessScore * wFreshness +
+    performanceScore * wAcceptance;
+
+  return Math.round(totalScore * 1000) / 1000;
 };
 
 /**
- * Find eligible and available delivery partners near store location
- * Supports progressive radius expansion tiers:
- * - PRIORITY_1: Inside vendor's configured delivery radius (vendor.deliveryRadiusKm || 5 km)
- * - PRIORITY_2_EXPANDED: 2x vendor radius or 15 km, whichever is larger (up to 30 km)
- * - PRIORITY_3_MAX: Up to MAX_SEARCH_DISTANCE_KM (30 km)
- * Candidates are strictly filtered by:
- * - approvalStatus: "APPROVED"
- * - securityDeposit.status: "PAID"
- * - availability: "ONLINE"
- * - activeOrderId: null
- * - serviceCity / serviceArea matching (relaxed if pool exhausted)
- * - Excludes specified partner IDs (declined, timed out, or notified in current cycle)
- * Candidates are sorted nearest-to-furthest from vendor coordinates.
+ * Find and rank eligible delivery partners near pickup store using Redis GEO + MongoDB
  */
 export const findEligiblePartners = async ({
   longitude,
@@ -89,121 +109,161 @@ export const findEligiblePartners = async ({
   maxDistanceMeters = null,
   excludePartnerIds = [],
   serviceCity = "",
+  scoringWeights = {},
+  maxActiveOrders = 1,
 }) => {
   const storeLng = Number(longitude);
   const storeLat = Number(latitude);
 
-  // Compute search distance in meters based on tier or explicit parameter
-  let effectiveMaxDistanceMeters;
+  let effectiveRadiusKm;
   if (maxDistanceMeters != null && !isNaN(maxDistanceMeters)) {
-    effectiveMaxDistanceMeters = Number(maxDistanceMeters);
+    effectiveRadiusKm = maxDistanceMeters / 1000;
   } else if (tier === "PRIORITY_1") {
-    effectiveMaxDistanceMeters = (vendorRadiusKm || DEFAULT_VENDOR_RADIUS_KM) * 1000;
+    effectiveRadiusKm = vendorRadiusKm || DEFAULT_VENDOR_RADIUS_KM;
   } else if (tier === "PRIORITY_2_EXPANDED") {
-    const expandedKm = Math.min(
+    effectiveRadiusKm = Math.min(
       MAX_SEARCH_DISTANCE_KM,
       Math.max(15, (vendorRadiusKm || DEFAULT_VENDOR_RADIUS_KM) * 2)
     );
-    effectiveMaxDistanceMeters = expandedKm * 1000;
   } else {
-    // PRIORITY_3_MAX or fallback
-    effectiveMaxDistanceMeters = MAX_SEARCH_DISTANCE_KM * 1000;
+    effectiveRadiusKm = MAX_SEARCH_DISTANCE_KM;
   }
 
-  const baseFilter = {
-    _id: { $nin: excludePartnerIds },
-    approvalStatus: "APPROVED",
-    "securityDeposit.status": "PAID",
-    availability: "ONLINE",
-    activeOrderId: null,
-  };
+  const excludeSet = new Set((excludePartnerIds || []).map((id) => id.toString()));
 
-  if (serviceCity) {
-    baseFilter.$or = [
-      { serviceCity: new RegExp(`^${serviceCity}$`, "i") },
-      { serviceCity: "" },
-      { serviceCity: null },
-    ];
+  // 1. First probe Redis for fast available nearby riders
+  const redisCandidates = await redisDispatchService.findNearbyAvailableRiders(
+    storeLng,
+    storeLat,
+    effectiveRadiusKm,
+    Array.from(excludeSet)
+  );
+
+  let rawPartners = [];
+
+  if (redisCandidates.length > 0) {
+    const candidateIds = redisCandidates.map((c) => c.riderId);
+    const dbPartners = await DeliveryBoy.find({
+      _id: { $in: candidateIds },
+      approvalStatus: "APPROVED",
+      "securityDeposit.status": "PAID",
+      availability: { $in: ["ONLINE", "AVAILABLE"] },
+      activeOrderId: null,
+    });
+
+    const dbMap = new Map(dbPartners.map((p) => [p._id.toString(), p]));
+
+    for (const rc of redisCandidates) {
+      const p = dbMap.get(rc.riderId);
+      if (p) {
+        rawPartners.push({
+          partner: p,
+          distanceKm: rc.distanceKm,
+          locationAgeSeconds: rc.locationAgeSeconds || 0,
+        });
+      }
+    }
   }
 
-  let partners = [];
+  // 2. Fallback to MongoDB 2dsphere / Haversine if Redis has no records or during bootstrap
+  if (rawPartners.length === 0) {
+    const baseFilter = {
+      _id: { $nin: Array.from(excludeSet) },
+      approvalStatus: "APPROVED",
+      "securityDeposit.status": "PAID",
+      availability: "ONLINE",
+      activeOrderId: null,
+    };
 
-  // 1. Primary Query: MongoDB 2dsphere $near query (sorted nearest-to-furthest)
-  try {
-    partners = await DeliveryBoy.find({
-      ...baseFilter,
-      currentLocation: {
-        $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [storeLng, storeLat],
-          },
-          $maxDistance: effectiveMaxDistanceMeters,
-        },
-      },
-    }).limit(20);
-  } catch (err) {
-    console.warn(
-      "[findEligiblePartners] $near query warning, falling back to Haversine sort:",
-      err.message
-    );
-  }
-
-  // 2. Fallback / Haversine distance verification:
-  // If $near fails or returns empty, query candidates and calculate exact Haversine distance
-  if (!partners || partners.length === 0) {
-    let candidates = await DeliveryBoy.find(baseFilter).limit(50);
-    if (!candidates || candidates.length === 0) {
-      // Relax city constraint to avoid dropping orders when city naming differs
-      const relaxedFilter = { ...baseFilter };
-      delete relaxedFilter.$or;
-      candidates = await DeliveryBoy.find(relaxedFilter).limit(50);
+    if (serviceCity) {
+      baseFilter.$or = [
+        { serviceCity: new RegExp(`^${serviceCity}$`, "i") },
+        { serviceCity: "" },
+        { serviceCity: null },
+      ];
     }
 
-    const effectiveMaxKm = effectiveMaxDistanceMeters / 1000;
+    try {
+      const mongoResults = await DeliveryBoy.find({
+        ...baseFilter,
+        currentLocation: {
+          $near: {
+            $geometry: { type: "Point", coordinates: [storeLng, storeLat] },
+            $maxDistance: effectiveRadiusKm * 1000,
+          },
+        },
+      }).limit(20);
 
-    partners = (candidates || [])
-      .map((p) => {
+      rawPartners = (mongoResults || []).map((p) => {
         const pLng = Number(p.currentLocation?.coordinates?.[0]) || storeLng;
         const pLat = Number(p.currentLocation?.coordinates?.[1]) || storeLat;
         const distKm = calculateDistanceKm(pLat, pLng, storeLat, storeLng);
-        return { partner: p, distanceKm: distKm };
-      })
-      .filter((item) => item.distanceKm <= effectiveMaxKm)
-      .sort((a, b) => a.distanceKm - b.distanceKm)
-      .map((item) => item.partner);
-  } else {
-    // Even when $near succeeded, ensure exact distance sorting
-    partners = partners
-      .map((p) => {
-        const pLng = Number(p.currentLocation?.coordinates?.[0]) || storeLng;
-        const pLat = Number(p.currentLocation?.coordinates?.[1]) || storeLat;
-        const distKm = calculateDistanceKm(pLat, pLng, storeLat, storeLng);
-        return { partner: p, distanceKm: distKm };
-      })
-      .sort((a, b) => a.distanceKm - b.distanceKm)
-      .map((item) => item.partner);
+        const ageSec = p.lastLocationUpdatedAt
+          ? Math.round((Date.now() - new Date(p.lastLocationUpdatedAt).getTime()) / 1000)
+          : 300;
+        return { partner: p, distanceKm: distKm, locationAgeSeconds: ageSec };
+      });
+    } catch (err) {
+      console.warn("[findEligiblePartners] $near fallback warning:", err.message);
+      // Secondary fallback without $near
+      const candidates = await DeliveryBoy.find(baseFilter).limit(50);
+      rawPartners = (candidates || [])
+        .map((p) => {
+          const pLng = Number(p.currentLocation?.coordinates?.[0]) || storeLng;
+          const pLat = Number(p.currentLocation?.coordinates?.[1]) || storeLat;
+          const distKm = calculateDistanceKm(pLat, pLng, storeLat, storeLng);
+          const ageSec = p.lastLocationUpdatedAt
+            ? Math.round((Date.now() - new Date(p.lastLocationUpdatedAt).getTime()) / 1000)
+            : 300;
+          return { partner: p, distanceKm: distKm, locationAgeSeconds: ageSec };
+        })
+        .filter((item) => item.distanceKm <= effectiveRadiusKm);
+    }
   }
 
-  return partners;
+  // 3. Multi-Factor Scoring & Ranking
+  const scoredPartners = rawPartners
+    .map(({ partner, distanceKm, locationAgeSeconds }) => {
+      // Estimated Time of Arrival: assumes 25 km/h urban average speed + 3 mins buffer
+      const etaMinutes = Math.max(2, Math.round((distanceKm / 25) * 60 + 3));
+
+      const score = calculateRiderScore({
+        distanceKm,
+        etaMinutes,
+        activeDeliveriesCount: partner.activeOrderId ? 1 : 0,
+        maxActiveOrders,
+        locationAgeSeconds,
+        rating: partner.metrics?.rating || 5.0,
+        acceptanceRate: partner.metrics?.acceptanceRate || 100,
+        weights: scoringWeights,
+      });
+
+      return {
+        partner,
+        distanceKm,
+        etaMinutes,
+        score,
+      };
+    })
+    .sort((a, b) => b.score - a.score || a.distanceKm - b.distanceKm);
+
+  return scoredPartners.map((item) => item.partner);
 };
 
 /**
- * Dispatch an order to the nearest available delivery boy with automated retry,
- * 60-second acceptance timer orchestration, persistent notification logging,
- * progressive radius expansion, and escalation safeguards.
+ * Dispatch an order automatically to the best eligible delivery partner
  */
 export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
   const orderIdStr = orderId.toString();
 
-  // Guard against concurrent duplicate dispatch execution
-  if (dispatchInProgressLocks.has(orderIdStr)) {
+  // 1. Acquire Redis Distributed Lock for atomic execution
+  const lockToken = await redisDispatchService.acquireDispatchLock(orderIdStr, 15);
+  if (!lockToken) {
     console.log(
-      `[Dispatch] Dispatch already in progress for order ${orderIdStr}. Skipping concurrent trigger.`
+      `[Dispatch Mutex] Dispatch locked for order ${orderIdStr}. Skipping concurrent attempt.`
     );
     return { success: false, message: "Dispatch already in progress" };
   }
-  dispatchInProgressLocks.add(orderIdStr);
 
   try {
     const order = await Order.findById(orderId).populate("vendor customer");
@@ -212,9 +272,10 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
       return { success: false, message: "Order not found" };
     }
 
-    // 1. Verify delivery is still required and unassigned
+    // 2. Verify order is unassigned and in a dispatchable state
     if (order.assignedDeliveryBoy) {
       console.log(`[Dispatch] Order ${order.orderNumber} already has assigned delivery partner`);
+      clearOrderDispatchTimer(order._id);
       return { success: false, message: "Order already assigned" };
     }
 
@@ -228,14 +289,25 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
       return { success: false, message: `Order status is ${order.orderStatus}` };
     }
 
-    // 2. Determine vendor store/warehouse coordinates and delivery radius
+    // 3. Load active dispatch configuration
+    const config = await DispatchSettings.getActiveConfig();
+    if (!config.autoDispatchEnabled && !options.force) {
+      console.log("[Dispatch] Automatic dispatch is currently disabled by Admin.");
+      return { success: false, message: "Auto-dispatch disabled" };
+    }
+
+    const offerTimeoutSeconds = config.riderOfferTimeoutSeconds || TIMEOUT_SECONDS;
+    const maxAttempts = config.maxDispatchAttempts || MAX_DISPATCH_ATTEMPTS;
+    const retryDelayMs = (config.retryDelaySeconds || 15) * 1000;
+
+    // 4. Resolve vendor pickup store coordinates
     const vendor = order.vendor;
     if (!vendor) {
       console.warn(`[Dispatch] Order ${order.orderNumber} has no associated vendor.`);
       return { success: false, message: "Vendor not found for order" };
     }
 
-    let storeLng = 85.3240;
+    let storeLng = 85.324;
     let storeLat = 27.7172;
 
     if (Array.isArray(vendor?.location?.coordinates) && vendor.location.coordinates.length >= 2) {
@@ -252,52 +324,46 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
     }
 
     const vendorRadiusKm = Math.min(
-      50,
-      Math.max(1, Number(vendor.deliveryRadiusKm) || DEFAULT_VENDOR_RADIUS_KM)
+      config.maxSearchRadiusKm || 50,
+      Math.max(
+        1,
+        Number(vendor.deliveryRadiusKm) || config.initialSearchRadiusKm || DEFAULT_VENDOR_RADIUS_KM
+      )
     );
 
-    // Optional: Log customer delivery distance relative to vendor radius
-    if (order.deliveryAddress?.longitude && order.deliveryAddress?.latitude) {
-      const custDistKm = calculateDistanceKm(
-        storeLat,
-        storeLng,
-        Number(order.deliveryAddress.latitude),
-        Number(order.deliveryAddress.longitude)
-      );
-      console.log(
-        `[Dispatch] Order #${order.orderNumber} - Vendor Radius: ${vendorRadiusKm}km, Customer Drop Distance: ${custDistKm}km`
-      );
-    }
-
-    // 3. Find or reuse existing DeliveryAssignment for this order & vendor
+    // 5. Existing DeliveryAssignment check
     let assignment = await DeliveryAssignment.findOne({
       order: order._id,
       vendor: vendor._id,
     }).sort({ createdAt: -1 });
 
     if (assignment) {
-      // If already accepted or completed, do nothing
       if (assignment.status === "ACCEPTED" || assignment.status === "COMPLETED") {
         return { success: true, message: "Assignment already accepted", assignment };
       }
 
-      // If active offer is currently running and has not expired, preserve it
+      // If active offer is currently pending and unexpired, preserve it
       if (assignment.status === "OFFERED" && assignment.expiresAt > new Date()) {
-        console.log(
-          `[Dispatch] Order ${order.orderNumber} already has active offer to partner ${assignment.deliveryBoy}`
+        const isStillValidInRedis = await redisDispatchService.isOfferActive(
+          order._id,
+          assignment.deliveryBoy
         );
-        return { success: true, message: "Offer currently pending", assignment };
+        if (isStillValidInRedis) {
+          console.log(
+            `[Dispatch] Order ${order.orderNumber} has active unexpired offer to partner ${assignment.deliveryBoy}`
+          );
+          return { success: true, message: "Offer currently pending", assignment };
+        }
       }
 
-      // If active offer has expired, transition it to TIMED_OUT
+      // If expired, transition to TIMED_OUT
       if (assignment.status === "OFFERED" && assignment.expiresAt <= new Date()) {
-        console.log(
-          `[Dispatch] Previous offer for order ${order.orderNumber} expired. Transitioning to TIMED_OUT...`
-        );
         assignment.status = "TIMED_OUT";
         if (
           assignment.deliveryBoy &&
-          !assignment.timedOutRiders.some((id) => id.toString() === assignment.deliveryBoy.toString())
+          !assignment.timedOutRiders.some(
+            (id) => id.toString() === assignment.deliveryBoy.toString()
+          )
         ) {
           assignment.timedOutRiders.push(assignment.deliveryBoy);
         }
@@ -305,19 +371,18 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
       }
     }
 
-    // 4. Check escalation and attempt limits
+    // 6. Check attempt limit & escalation
     const currentAttemptCount = assignment ? assignment.attemptCount || 1 : 1;
-    if (currentAttemptCount > MAX_DISPATCH_ATTEMPTS) {
+    if (currentAttemptCount > maxAttempts) {
       console.warn(
-        `[Dispatch Escalation] Order ${order.orderNumber} exceeded ${MAX_DISPATCH_ATTEMPTS} attempts without rider acceptance.`
+        `[Dispatch Escalation] Order ${order.orderNumber} exceeded ${maxAttempts} attempts without acceptance.`
       );
       if (assignment) {
         assignment.status = "UNASSIGNED_ESCALATED";
-        assignment.failureReason = `No rider accepted after ${MAX_DISPATCH_ATTEMPTS} automated dispatch attempts.`;
+        assignment.failureReason = `No rider accepted after ${maxAttempts} automated dispatch attempts.`;
         await assignment.save();
       }
 
-      // Notify operations staff
       try {
         emitStaffAlert({
           type: "staff_delivery:unassigned_escalated",
@@ -329,24 +394,22 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
 
       return {
         success: false,
-        message: `Order exceeded maximum dispatch retry limit (${MAX_DISPATCH_ATTEMPTS}). Escalated to operations.`,
+        message: `Order exceeded maximum dispatch retry limit (${maxAttempts}). Escalated to operations.`,
       };
     }
 
-    // 5. Progressive Range & Rider Selection
-    // Build exclusion list for this round: riders who explicitly declined + riders already timed out/notified in current cycle
+    // 7. Exclusions
     const declinedIds = (assignment?.declinedRiders || []).map((id) => id.toString());
     const timedOutIds = (assignment?.timedOutRiders || []).map((id) => id.toString());
     const notifiedIds = (assignment?.notifiedRiders || []).map((id) => id.toString());
-
-    let excludeIds = Array.from(new Set([...declinedIds, ...timedOutIds, ...notifiedIds]));
+    const excludeIds = Array.from(new Set([...declinedIds, ...timedOutIds, ...notifiedIds]));
 
     const serviceCity = vendor.shippingLocations?.city || order.deliveryAddress?.city || "";
 
     let eligiblePartners = [];
     let selectedTier = "PRIORITY_1";
 
-    // --- Tier 1: Search within vendor's configured delivery radius ---
+    // --- Tier 1: Initial vendor radius ---
     eligiblePartners = await findEligiblePartners({
       longitude: storeLng,
       latitude: storeLat,
@@ -354,14 +417,13 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
       tier: "PRIORITY_1",
       excludePartnerIds: excludeIds,
       serviceCity,
+      scoringWeights: config.scoringWeights,
+      maxActiveOrders: config.maxActiveOrdersPerRider,
     });
 
-    // --- Tier 2: Expand search to nearby eligible riders outside primary radius ---
+    // --- Tier 2: Expanded radius ---
     if (!eligiblePartners || eligiblePartners.length === 0) {
       selectedTier = "PRIORITY_2_EXPANDED";
-      console.log(
-        `[Dispatch] Priority 1 range (${vendorRadiusKm}km) exhausted for order ${order.orderNumber}. Expanding to Priority 2...`
-      );
       eligiblePartners = await findEligiblePartners({
         longitude: storeLng,
         latitude: storeLat,
@@ -369,15 +431,14 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
         tier: "PRIORITY_2_EXPANDED",
         excludePartnerIds: excludeIds,
         serviceCity,
+        scoringWeights: config.scoringWeights,
+        maxActiveOrders: config.maxActiveOrdersPerRider,
       });
     }
 
-    // --- Tier 3: Expand search to max delivery radius (30 km) ---
+    // --- Tier 3: Maximum search radius ---
     if (!eligiblePartners || eligiblePartners.length === 0) {
       selectedTier = "PRIORITY_3_MAX";
-      console.log(
-        `[Dispatch] Priority 2 range exhausted for order ${order.orderNumber}. Expanding to Priority 3 (Max ${MAX_SEARCH_DISTANCE_KM}km)...`
-      );
       eligiblePartners = await findEligiblePartners({
         longitude: storeLng,
         latitude: storeLat,
@@ -385,20 +446,16 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
         tier: "PRIORITY_3_MAX",
         excludePartnerIds: excludeIds,
         serviceCity,
+        scoringWeights: config.scoringWeights,
+        maxActiveOrders: config.maxActiveOrdersPerRider,
       });
     }
 
-    // --- Circular Retry: If all riders in current cycle have been tried, check newly free or re-available riders ---
-    // (Still exclude riders who explicitly declined)
+    // --- Circular Retry: Recycle timed-out riders if whole cycle is exhausted ---
     if (
       (!eligiblePartners || eligiblePartners.length === 0) &&
       (timedOutIds.length > 0 || notifiedIds.length > 0)
     ) {
-      console.log(
-        `[Dispatch] Cycle exhausted for order ${order.orderNumber}. Checking newly free or re-available riders (excluding explicit declines)...`
-      );
-
-      // Try Priority 1 again for newly online/free riders
       eligiblePartners = await findEligiblePartners({
         longitude: storeLng,
         latitude: storeLat,
@@ -406,41 +463,19 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
         tier: "PRIORITY_1",
         excludePartnerIds: assignment?.declinedRiders || [],
         serviceCity,
+        scoringWeights: config.scoringWeights,
+        maxActiveOrders: config.maxActiveOrdersPerRider,
       });
-
-      if (!eligiblePartners || eligiblePartners.length === 0) {
-        selectedTier = "PRIORITY_2_EXPANDED";
-        eligiblePartners = await findEligiblePartners({
-          longitude: storeLng,
-          latitude: storeLat,
-          vendorRadiusKm,
-          tier: "PRIORITY_2_EXPANDED",
-          excludePartnerIds: assignment?.declinedRiders || [],
-          serviceCity,
-        });
-      }
-
-      if (!eligiblePartners || eligiblePartners.length === 0) {
-        selectedTier = "PRIORITY_3_MAX";
-        eligiblePartners = await findEligiblePartners({
-          longitude: storeLng,
-          latitude: storeLat,
-          vendorRadiusKm,
-          tier: "PRIORITY_3_MAX",
-          excludePartnerIds: assignment?.declinedRiders || [],
-          serviceCity,
-        });
-      }
     }
 
-    // 6. Handle case where no eligible riders are currently available
+    // 8. Handle when no riders are eligible
     if (!eligiblePartners || eligiblePartners.length === 0) {
       console.log(
-        `[Dispatch] No eligible delivery partners currently available for order ${order.orderNumber}. Scheduling controlled retry in ${RETRY_DELAY_MS / 1000}s...`
+        `[Dispatch] No eligible delivery partners available for order ${order.orderNumber}. Scheduling retry in ${retryDelayMs / 1000}s...`
       );
 
       if (assignment) {
-        assignment.nextRetryAt = new Date(Date.now() + RETRY_DELAY_MS);
+        assignment.nextRetryAt = new Date(Date.now() + retryDelayMs);
         assignment.failureReason = "No eligible delivery partners available nearby";
         await assignment.save();
       } else {
@@ -449,16 +484,13 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
           vendor: vendor._id,
           status: "TIMED_OUT",
           attemptCount: 1,
-          maxRetries: MAX_DISPATCH_ATTEMPTS,
+          maxRetries: maxAttempts,
           failureReason: "No eligible delivery partners available nearby",
-          nextRetryAt: new Date(Date.now() + RETRY_DELAY_MS),
+          nextRetryAt: new Date(Date.now() + retryDelayMs),
         });
       }
 
-      // Schedule controlled background retry (clear previous retry timer if any)
-      if (activeOrderTimers.has(orderIdStr)) {
-        clearTimeout(activeOrderTimers.get(orderIdStr));
-      }
+      clearOrderDispatchTimer(order._id);
 
       const retryTimer = setTimeout(async () => {
         activeOrderTimers.delete(orderIdStr);
@@ -471,36 +503,39 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
             !freshOrder.assignedDeliveryBoy &&
             !["DELIVERED", "CANCELLED", "REJECTED"].includes(freshOrder.orderStatus)
           ) {
-            console.log(
-              `[Dispatch Retry Timer] Retrying dispatch for order ${freshOrder._id}...`
-            );
+            console.log(`[Dispatch Retry Timer] Retrying dispatch for order ${freshOrder._id}...`);
             await dispatchOrderToNearestPartner(freshOrder._id);
           }
         } catch (retryErr) {
-          console.error("[Dispatch Retry Execution Error]:", retryErr.message);
+          console.error("[Dispatch Retry Error]:", retryErr.message);
         }
-      }, RETRY_DELAY_MS);
+      }, retryDelayMs);
 
       activeOrderTimers.set(orderIdStr, retryTimer);
 
       return {
         success: false,
-        message:
-          "No eligible delivery partners available nearby. System scheduled controlled retry.",
+        message: "No eligible delivery partners available nearby. Scheduled retry.",
       };
     }
 
-    // 7. Pick nearest candidate
+    // 9. Best Ranked Candidate
     const candidate = eligiblePartners[0];
 
+    // Compute precise distance and payout from rate card
     const partnerLng = candidate.currentLocation?.coordinates?.[0] || storeLng;
     const partnerLat = candidate.currentLocation?.coordinates?.[1] || storeLat;
     const distanceToStore = calculateDistanceKm(partnerLat, partnerLng, storeLat, storeLng);
-    const estimatedEarnings = 40 + Math.round(distanceToStore * 15); // Base ₹40 + ₹15/km
 
-    const expiresAt = new Date(Date.now() + TIMEOUT_SECONDS * 1000);
+    const rateCard = config.payoutRateCard || {};
+    const baseFee = rateCard.baseDeliveryFee ?? 40;
+    const perKmFee = rateCard.perKmDistanceFee ?? 15;
+    const peakPay = rateCard.peakHourIncentive ?? 0;
+    const estimatedEarnings = Math.round(baseFee + distanceToStore * perKmFee + peakPay);
 
-    // 8. Create or update DeliveryAssignment atomically
+    const expiresAt = new Date(Date.now() + offerTimeoutSeconds * 1000);
+
+    // 10. Update or create DeliveryAssignment atomically
     const pickupLoc = {
       address:
         vendor.shippingLocations?.warehouseAddress ||
@@ -549,7 +584,7 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
         vendor: vendor._id,
         status: "OFFERED",
         attemptCount: 1,
-        maxRetries: MAX_DISPATCH_ATTEMPTS,
+        maxRetries: maxAttempts,
         offeredAt: new Date(),
         expiresAt,
         distanceKm: distanceToStore,
@@ -569,7 +604,15 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
       });
     }
 
-    // 9. Ensure Cryptographic OTPs are generated on Order
+    // 11. Store Active Offer in Redis with TTL
+    await redisDispatchService.setDispatchOffer(
+      order._id,
+      candidate._id,
+      offerTimeoutSeconds + 2
+    );
+
+    // 12. Generate Cryptographic Pickup & Delivery OTPs if not present
+    let orderModified = false;
     if (!order.pickupOtp?.code) {
       const plainPickupOtp = generateSecureOTP();
       const hashedPickupOtp = await hashOTP(plainPickupOtp);
@@ -579,6 +622,7 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
         expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
         attempts: 0,
       };
+      orderModified = true;
     }
 
     if (!order.deliveryOtp?.code) {
@@ -590,14 +634,17 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
         expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
         attempts: 0,
       };
+      orderModified = true;
     }
 
-    await order.save();
+    if (orderModified) {
+      await order.save();
+    }
 
-    // 10. Prepare socket offer payload
+    // 13. Build real-time offer payload
     const offerPayload = {
-      assignmentId: assignment._id,
-      orderId: order._id,
+      assignmentId: assignment._id.toString(),
+      orderId: order._id.toString(),
       orderNumber: order.orderNumber,
       pickup: {
         storeName: vendor.businessDetails?.businessName || "Bhansamart Partner Store",
@@ -613,12 +660,13 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
       partnerLocation: candidate.currentLocation?.coordinates || [partnerLng, partnerLat],
       itemsCount: order.totalCount,
       estimatedEarnings,
-      expiresAt,
-      timeoutSeconds: TIMEOUT_SECONDS,
+      expiresAt: expiresAt.toISOString(),
+      timeoutSeconds: offerTimeoutSeconds,
       tier: selectedTier,
     };
 
-    // 11. Real-Time Socket Emission
+    // 14. Emit Real-Time Socket Events
+    // Dual emit for legacy "delivery:order:request" and standardized "dispatch:offer"
     emitToDeliveryPartner(
       candidate._id.toString(),
       "delivery:order:request",
@@ -626,13 +674,20 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
       candidate.user?.toString()
     );
 
-    // 12. Persistent Notification in Delivery Boy In-App Notifications Feed
+    emitToDeliveryPartner(
+      candidate._id.toString(),
+      "dispatch:offer",
+      offerPayload,
+      candidate.user?.toString()
+    );
+
+    // 15. Create Persistent In-App Notification
     await createDeliveryNotification({
       deliveryBoyId: candidate._id,
       userId: candidate.user,
       type: "delivery_request_received",
       title: `New Delivery Request #${order.orderNumber} 🛵`,
-      message: `Store ${vendor.businessDetails?.businessName || "Store"} has an order ready. Est. Earning: NPR ${estimatedEarnings}. Accept within ${TIMEOUT_SECONDS}s.`,
+      message: `Store ${vendor.businessDetails?.businessName || "Store"} has an order ready. Est. Earning: NPR ${estimatedEarnings}. Accept within ${offerTimeoutSeconds}s.`,
       data: {
         orderId: order._id.toString(),
         assignmentId: assignment._id.toString(),
@@ -645,13 +700,11 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
     });
 
     console.log(
-      `[Dispatch] Offered Order ${order.orderNumber} (Attempt ${assignment.attemptCount}, Tier: ${selectedTier}) to Nearest Partner ${candidate.fullName} (${candidate._id}, ${distanceToStore} km away). Timeout in ${TIMEOUT_SECONDS}s.`
+      `[Dispatch Engine] Offered Order #${order.orderNumber} (Attempt ${assignment.attemptCount}, Tier: ${selectedTier}) to Top-Ranked Partner ${candidate.fullName} (${distanceToStore} km away). Expiration in ${offerTimeoutSeconds}s.`
     );
 
-    // 13. Schedule server-side timeout handler (60s + 1s leeway)
-    if (activeOrderTimers.has(orderIdStr)) {
-      clearTimeout(activeOrderTimers.get(orderIdStr));
-    }
+    // 16. Schedule Server-Side Expiration Timer
+    clearOrderDispatchTimer(order._id);
 
     const offerTimeoutTimer = setTimeout(async () => {
       activeOrderTimers.delete(orderIdStr);
@@ -661,21 +714,20 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
             _id: assignment._id,
             status: "OFFERED",
             deliveryBoy: candidate._id,
-            expiresAt: { $lte: new Date(Date.now() + 2000) }, // leeway
+            expiresAt: { $lte: new Date(Date.now() + 2000) },
           },
           {
             $set: { status: "TIMED_OUT" },
             $addToSet: { timedOutRiders: candidate._id },
           },
-          { new: true }
+          { returnDocument: "after" }
         );
 
         if (timedOutAssignment) {
           console.log(
-            `[Dispatch Timeout] Assignment ${assignment._id} timed out for partner ${candidate._id} after ${TIMEOUT_SECONDS}s. Forwarding to next candidate...`
+            `[Dispatch Timeout] Offer for order #${order.orderNumber} timed out for partner ${candidate._id} after ${offerTimeoutSeconds}s. Forwarding to next candidate...`
           );
 
-          // Update attempt status in attempts array
           await DeliveryAssignment.updateOne(
             {
               _id: assignment._id,
@@ -685,7 +737,10 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
             { $set: { "attempts.$.status": "TIMED_OUT", "attempts.$.respondedAt": new Date() } }
           );
 
-          // Emit expired event to rider
+          // Clear Redis offer key
+          await redisDispatchService.clearDispatchOffer(order._id, candidate._id);
+
+          // Emit expiration events to rider
           emitToDeliveryPartner(
             candidate._id.toString(),
             "delivery:order:expired",
@@ -697,34 +752,30 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
             candidate.user?.toString()
           );
 
-          // Create persistent notification for expiry
-          await createDeliveryNotification({
-            deliveryBoyId: candidate._id,
-            userId: candidate.user,
-            type: "delivery_request_expired",
-            title: `Delivery Offer Expired: #${order.orderNumber}`,
-            message: `The ${TIMEOUT_SECONDS}s offer window for order #${order.orderNumber} expired and was forwarded to another partner.`,
-            data: {
-              orderId: order._id.toString(),
-              assignmentId: assignment._id.toString(),
+          emitToDeliveryPartner(
+            candidate._id.toString(),
+            "dispatch:offer:expired",
+            {
+              assignmentId: assignment._id,
+              orderId: order._id,
               orderNumber: order.orderNumber,
             },
-            category: "delivery",
-          });
+            candidate.user?.toString()
+          );
 
-          // Forward to next candidate
+          // Forward automatically to next available partner
           await dispatchOrderToNearestPartner(order._id);
         }
       } catch (timeoutErr) {
         console.error("[Dispatch Timeout Handler Error]:", timeoutErr);
       }
-    }, TIMEOUT_SECONDS * 1000 + 1000);
+    }, offerTimeoutSeconds * 1000 + 1000);
 
     activeOrderTimers.set(orderIdStr, offerTimeoutTimer);
 
     return {
       success: true,
-      message: "Order offered to nearest delivery partner",
+      message: "Order offered to best eligible delivery partner",
       assignmentId: assignment._id,
       deliveryBoyId: candidate._id,
       tier: selectedTier,
@@ -733,19 +784,20 @@ export const dispatchOrderToNearestPartner = async (orderId, options = {}) => {
     console.error("[dispatchOrderToNearestPartner Error]:", error);
     return { success: false, message: error.message };
   } finally {
-    dispatchInProgressLocks.delete(orderIdStr);
+    // Release distributed lock
+    await redisDispatchService.releaseDispatchLock(orderIdStr, lockToken);
   }
 };
 
 /**
- * Clean up active dispatch timer for an order (e.g. when order is accepted or cancelled)
+ * Clean up active dispatch timer for an order
  */
 export const clearOrderDispatchTimer = (orderId) => {
   const orderIdStr = orderId?.toString();
   if (orderIdStr && activeOrderTimers.has(orderIdStr)) {
     clearTimeout(activeOrderTimers.get(orderIdStr));
     activeOrderTimers.delete(orderIdStr);
-    console.log(`[Dispatch] Cleared active dispatch timer for order ${orderIdStr}`);
+    console.log(`[Dispatch Engine] Cleared active dispatch timer for order ${orderIdStr}`);
   }
 };
 
@@ -792,8 +844,10 @@ export default {
   hashOTP,
   verifyHashedOTP,
   calculateDistanceKm,
+  calculateRiderScore,
   findEligiblePartners,
   dispatchOrderToNearestPartner,
+  dispatchOrder: dispatchOrderToNearestPartner,
   clearOrderDispatchTimer,
   recoverStaleAssignments,
 };

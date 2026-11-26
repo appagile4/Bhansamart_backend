@@ -1,7 +1,11 @@
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import User from "../models/User.js";
 import SecurityDepositLedger from "../models/SecurityDepositLedger.js";
+import DeliveryAssignment from "../models/DeliveryAssignment.js";
+import DispatchSettings from "../models/DispatchSettings.js";
 import Order from "../models/Order.js";
+import redisDispatchService from "../services/redisDispatchService.js";
+import { getIO } from "../socket/socketManager.js";
 import { AppError } from "../middleware/errorMiddleware.js";
 import { createDeliveryNotification } from "../services/deliveryNotificationService.js";
 
@@ -376,6 +380,258 @@ export const processDepositRefund = async (req, res, next) => {
       success: true,
       message: "Security deposit refunded successfully. Partner deactivated.",
       refundLedger,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get real-time dispatch dashboard overview
+ * GET /api/admin/delivery/dispatch/overview
+ */
+export const getDispatchOverview = async (req, res, next) => {
+  try {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const [
+      pendingCount,
+      offeredCount,
+      activeCount,
+      completedToday,
+      cancelledToday,
+      onlineRiderIds,
+      availableRiderIds,
+      settings,
+    ] = await Promise.all([
+      DeliveryAssignment.countDocuments({ status: "UNASSIGNED" }),
+      DeliveryAssignment.countDocuments({ status: "OFFERED" }),
+      DeliveryAssignment.countDocuments({
+        status: { $in: ["ACCEPTED", "STORE_REACHED", "PICKED_UP"] },
+      }),
+      DeliveryAssignment.countDocuments({
+        status: "DELIVERED",
+        updatedAt: { $gte: todayStart },
+      }),
+      DeliveryAssignment.countDocuments({
+        status: { $in: ["CANCELLED", "FAILED"] },
+        updatedAt: { $gte: todayStart },
+      }),
+      redisDispatchService.getOnlineRiders(),
+      redisDispatchService.getAvailableRiders(),
+      DispatchSettings.getActiveConfig(),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        pendingOrders: pendingCount,
+        offeredOrders: offeredCount,
+        activeDeliveries: activeCount,
+        completedToday,
+        cancelledToday,
+        ridersOnline: onlineRiderIds.length,
+        ridersAvailable: availableRiderIds.length,
+        ridersBusy: Math.max(0, onlineRiderIds.length - availableRiderIds.length),
+        autoDispatchEnabled: settings.autoDispatchEnabled,
+        offerTimeoutSeconds: settings.offerTimeoutSeconds,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get live geospatial radar snapshot of riders and orders
+ * GET /api/admin/delivery/dispatch/radar
+ */
+export const getDispatchRadar = async (req, res, next) => {
+  try {
+    const onlineRiderIds = await redisDispatchService.getOnlineRiders();
+    const availableRiderIds = new Set(await redisDispatchService.getAvailableRiders());
+
+    // Fetch MongoDB details for online riders
+    const ridersDb = await DeliveryBoy.find({
+      _id: { $in: onlineRiderIds },
+    }).select("fullName phone vehicleType currentLocation rating approvalStatus availability batteryLevel");
+
+    const ridersRadar = await Promise.all(
+      ridersDb.map(async (r) => {
+        const liveLoc = await redisDispatchService.getRiderLocation(r._id.toString());
+        return {
+          id: r._id,
+          name: r.fullName,
+          phone: r.phone,
+          vehicleType: r.vehicleType,
+          rating: r.rating || 5.0,
+          isAvailable: availableRiderIds.has(r._id.toString()),
+          batteryLevel: liveLoc?.batteryLevel ?? r.batteryLevel ?? 100,
+          latitude: liveLoc?.latitude ?? r.currentLocation?.coordinates?.[1] ?? null,
+          longitude: liveLoc?.longitude ?? r.currentLocation?.coordinates?.[0] ?? null,
+          lastUpdated: liveLoc?.updatedAt || r.updatedAt,
+        };
+      })
+    );
+
+    // Active & Offered delivery orders
+    const activeAssignments = await DeliveryAssignment.find({
+      status: { $in: ["OFFERED", "ACCEPTED", "STORE_REACHED", "PICKED_UP"] },
+    })
+      .populate("order", "orderNumber totalAmount deliveryAddress paymentStatus")
+      .populate("vendor", "storeName location")
+      .populate("deliveryBoy", "fullName phone")
+      .sort({ createdAt: -1 })
+      .limit(50);
+
+    res.status(200).json({
+      success: true,
+      riders: ridersRadar,
+      activeDeliveries: activeAssignments,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Manual override assignment by admin
+ * POST /api/admin/delivery/dispatch/manual-assign
+ */
+export const manualAssignOrder = async (req, res, next) => {
+  try {
+    const { orderId, deliveryBoyId, adminNotes } = req.body;
+
+    if (!orderId || !deliveryBoyId) {
+      throw new AppError("Order ID and Delivery Partner ID are required.", 400);
+    }
+
+    const partner = await DeliveryBoy.findById(deliveryBoyId);
+    if (!partner || partner.approvalStatus !== "APPROVED") {
+      throw new AppError("Target delivery partner is not approved or invalid.", 400);
+    }
+
+    const order = await Order.findById(orderId).populate("vendor", "storeName location");
+    if (!order) {
+      throw new AppError("Order not found.", 404);
+    }
+
+    let assignment = await DeliveryAssignment.findOne({ order: orderId });
+    if (!assignment) {
+      assignment = new DeliveryAssignment({
+        order: orderId,
+        vendor: order.vendor?._id || order.vendor,
+        customer: order.customer,
+      });
+    }
+
+    assignment.deliveryBoy = partner._id;
+    assignment.status = "ACCEPTED";
+    assignment.acceptedAt = new Date();
+    assignment.rejectionHistory = assignment.rejectionHistory || [];
+    if (adminNotes) {
+      assignment.notes = adminNotes;
+    }
+    await assignment.save();
+
+    // Sync Order document
+    order.deliveryPartner = partner._id;
+    order.deliveryStatus = "ASSIGNED";
+    await order.save();
+
+    // Mark rider busy in Redis and release any dispatch lock
+    await redisDispatchService.setRiderBusy(partner._id.toString());
+    await redisDispatchService.releaseDispatchLock(orderId);
+    await redisDispatchService.clearDispatchOffer(orderId);
+
+    // Broadcast assignment update via Socket
+    const io = getIO();
+    if (io) {
+      io.to(`order:${orderId}`).emit("order:status:updated", {
+        orderId,
+        status: order.orderStatus,
+        deliveryStatus: "ASSIGNED",
+        deliveryPartner: {
+          id: partner._id,
+          name: partner.fullName,
+          phone: partner.phone,
+        },
+      });
+
+      io.to(`rider:${partner._id}`).emit("dispatch:assignment:confirmed", {
+        assignmentId: assignment._id,
+        orderId,
+        status: "ACCEPTED",
+      });
+
+      io.to("admin:dispatch").emit("dispatch:radar:updated", {
+        orderId,
+        deliveryBoyId: partner._id,
+        action: "MANUAL_ASSIGN",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Order ${order.orderNumber} successfully assigned to ${partner.fullName}.`,
+      assignment,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get active dynamic dispatch configuration
+ * GET /api/admin/delivery/dispatch/settings
+ */
+export const getDispatchSettings = async (req, res, next) => {
+  try {
+    const settings = await DispatchSettings.getActiveConfig();
+    res.status(200).json({
+      success: true,
+      settings,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Update dynamic dispatch configuration
+ * PUT /api/admin/delivery/dispatch/settings
+ */
+export const updateDispatchSettings = async (req, res, next) => {
+  try {
+    const settings = await DispatchSettings.getActiveConfig();
+
+    const allowedFields = [
+      "autoDispatchEnabled",
+      "initialSearchRadiusKm",
+      "expandedSearchRadiusKm",
+      "maxSearchRadiusKm",
+      "offerTimeoutSeconds",
+      "batchSize",
+      "maxConcurrentOffers",
+      "maxActiveDeliveriesPerRider",
+      "scoringWeights",
+      "rateCard",
+    ];
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        settings[field] = req.body[field];
+      }
+    }
+
+    settings.updatedBy = req.user._id;
+    await settings.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Dispatch configuration updated successfully.",
+      settings,
     });
   } catch (error) {
     next(error);

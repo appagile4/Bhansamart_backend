@@ -1,6 +1,7 @@
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import Order from "../models/Order.js";
 import { AppError } from "../middleware/errorMiddleware.js";
+import redisDispatchService from "../services/redisDispatchService.js";
 import {
   emitDeliveryLocationUpdate,
   emitDeliveryPartnerStatus,
@@ -64,6 +65,13 @@ export const toggleAvailability = async (req, res, next) => {
 
       deliveryBoy.availability = "ONLINE";
       deliveryBoy.lastLocationUpdatedAt = new Date();
+      // Sync online status with Redis Dispatch Service
+      const coords = deliveryBoy.currentLocation?.coordinates;
+      await redisDispatchService.setRiderOnline(
+        deliveryBoy._id,
+        Array.isArray(coords) ? coords[0] : 85.324,
+        Array.isArray(coords) ? coords[1] : 27.7172
+      );
     } else {
       // Trying to go OFFLINE
       if (deliveryBoy.activeOrderId) {
@@ -76,6 +84,8 @@ export const toggleAvailability = async (req, res, next) => {
       }
 
       deliveryBoy.availability = "OFFLINE";
+      // Sync offline status with Redis Dispatch Service
+      await redisDispatchService.setRiderOffline(deliveryBoy._id);
     }
 
     await deliveryBoy.save();
@@ -151,6 +161,9 @@ export const updateGpsLocation = async (req, res, next) => {
     };
     deliveryBoy.lastLocationUpdatedAt = now;
     await deliveryBoy.save();
+
+    // Sync high-speed GPS coordinates to Redis for sub-millisecond dispatch lookup
+    await redisDispatchService.updateRiderLocation(deliveryBoy._id, lng, lat, heading, speed);
 
     // Broadcast live location to Admin radar
     emitDeliveryPartnerStatus(deliveryBoy._id, {
