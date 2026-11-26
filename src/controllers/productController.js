@@ -1,10 +1,7 @@
 import Product from "../models/Product.js";
 import Vendor from "../models/Vendor.js";
 import Brand from "../models/Brand.js";
-import {
-  uploadProductImageToCloudinary,
-  deleteFromCloudinary,
-} from "../utils/cloudinaryUpload.js";
+import { uploadProductImageToCloudinary } from "../utils/cloudinaryUpload.js";
 import {
   generateSku,
   generateUniqueSlug,
@@ -286,9 +283,8 @@ export const createProduct = async (req, res, next) => {
 
     // Invalidate product cache in Redis asynchronously
     invalidateCachePattern("products:*").catch(() => {});
-    if (id) deleteCache(`product:details:${id.toLowerCase()}`).catch(() => {});
-    if (updatedProduct?._id) deleteCache(`product:details:${updatedProduct._id.toString().toLowerCase()}`).catch(() => {});
-    if (updatedProduct?.slug) deleteCache(`product:details:${updatedProduct.slug.toLowerCase()}`).catch(() => {});
+    if (product?._id) deleteCache(`product:details:${product._id.toString().toLowerCase()}`).catch(() => {});
+    if (product?.slug) deleteCache(`product:details:${product.slug.toLowerCase()}`).catch(() => {});
 
     res.status(201).json({
       success: true,
@@ -845,8 +841,8 @@ export const toggleProductStock = async (req, res, next) => {
     // Invalidate product cache in Redis asynchronously
     invalidateCachePattern("products:*").catch(() => {});
     if (id) deleteCache(`product:details:${id.toLowerCase()}`).catch(() => {});
-    if (updatedProduct?._id) deleteCache(`product:details:${updatedProduct._id.toString().toLowerCase()}`).catch(() => {});
-    if (updatedProduct?.slug) deleteCache(`product:details:${updatedProduct.slug.toLowerCase()}`).catch(() => {});
+    if (product?._id) deleteCache(`product:details:${product._id.toString().toLowerCase()}`).catch(() => {});
+    if (product?.slug) deleteCache(`product:details:${product.slug.toLowerCase()}`).catch(() => {});
 
     res.status(200).json({
       success: true,
@@ -892,17 +888,10 @@ export const deleteProduct = async (req, res, next) => {
     // Invalidate product cache in Redis asynchronously
     invalidateCachePattern("products:*").catch(() => {});
     if (id) deleteCache(`product:details:${id.toLowerCase()}`).catch(() => {});
-    if (updatedProduct?._id) deleteCache(`product:details:${updatedProduct._id.toString().toLowerCase()}`).catch(() => {});
-    if (updatedProduct?.slug) deleteCache(`product:details:${updatedProduct.slug.toLowerCase()}`).catch(() => {});
+    if (product?._id) deleteCache(`product:details:${product._id.toString().toLowerCase()}`).catch(() => {});
+    if (product?.slug) deleteCache(`product:details:${product.slug.toLowerCase()}`).catch(() => {});
 
-    // Optionally delete from Cloudinary
-    if (product.images && product.images.length > 0) {
-      for (const img of product.images) {
-        if (img.publicId) {
-          deleteFromCloudinary(img.publicId).catch(() => {});
-        }
-      }
-    }
+    // Files are deleted by releaseByUrls above, and only when no order, cart, wishlist or refund still shows them
 
     res.status(200).json({
       success: true,

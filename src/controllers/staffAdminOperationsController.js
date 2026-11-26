@@ -16,6 +16,7 @@ import { AppError } from "../middleware/errorMiddleware.js";
 import { notifyStaffAdminsForVendor } from "../socket/socketManager.js";
 import { processOrderRefund } from "../services/financeLedgerService.js";
 import { generateNumericOTP } from "../utils/generateOTP.js";
+import { releaseByUrls } from "../utils/storageQuota.js";
 
 /**
  * Helper: Resolve StaffAdmin's accessible vendor IDs.
@@ -1474,6 +1475,11 @@ export const reviewBrandAdmin = async (req, res, next) => {
     brand.reviewedBy = req.user._id;
     brand.reviewedAt = new Date();
     await brand.save();
+
+    // Vendor storage: a rejected brand's logo no longer counts against the vendor (the file is kept for the record)
+    if (brand.status === "REJECTED" && brand.createdByVendor && brand.logo?.url) {
+      releaseByUrls(brand.createdByVendor._id, [brand.logo.url]).catch(() => {});
+    }
 
     // Real-time alert to vendor & staff
     if (brand.createdByVendor) {
